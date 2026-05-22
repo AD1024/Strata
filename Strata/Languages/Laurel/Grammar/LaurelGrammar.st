@@ -106,6 +106,10 @@ op ifThenElse (cond: StmtExpr, thenBranch: StmtExpr, elseBranch: Option ElseBran
 op assert (cond : StmtExpr, errorMessage: Option ErrorSummary) : StmtExpr => @[prec(0)] "assert " cond:0 errorMessage:0;
 op assume (cond : StmtExpr) : StmtExpr => @[prec(0)] "assume " cond:0;
 op return (value : StmtExpr) : StmtExpr => @[prec(0)] "return " value:0;
+
+// Coroutine suspension: `yield` (unit) or `yield e` (value-producing).
+op yield: StmtExpr => @[prec(0)] "yield";
+op yieldValue (value : StmtExpr) : StmtExpr => @[prec(0)] "yield " value:0;
 op block (stmts : SemicolonSepBy StmtExpr) : StmtExpr => @[prec(1000)] "{ " stmts " }";
 op labelledBlock (stmts : SemicolonSepBy StmtExpr, label : Ident) : StmtExpr => @[prec(1000)] "{ " stmts " }" label;
 op exit (label : Ident) : StmtExpr => @[prec(0)] "exit " label;
@@ -165,6 +169,12 @@ op requiresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): RequiresCl
 category EnsuresClause;
 op ensuresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): EnsuresClause => "\n  ensures " cond:0 errorMessage;
 
+category ReliesClause;
+op reliesClause(cond: StmtExpr, errorMessage: Option ErrorSummary): ReliesClause => "\n  relies " cond:0 errorMessage;
+
+category GuaranteesClause;
+op guaranteesClause(cond: StmtExpr, errorMessage: Option ErrorSummary): GuaranteesClause => "\n  guarantees " cond:0 errorMessage;
+
 category ModifiesClause;
 op modifiesClause(refs: CommaSepBy StmtExpr): ModifiesClause => "\n  modifies " refs;
 op modifiesWildcard: ModifiesClause => "\n  modifies *";
@@ -175,6 +185,10 @@ op returnParameters(parameters: CommaSepBy Parameter): ReturnParameters => "\n  
 category OpaqueSpec;
 op opaqueSpec(ensures: Seq EnsuresClause, modifies: Seq ModifiesClause): OpaqueSpec =>
   "\n  opaque" ensures modifies;
+
+category CoroutineSpec;
+op coroutineSpec(relies: Seq ReliesClause, guarantees: Seq GuaranteesClause, modifies: Seq ModifiesClause): CoroutineSpec
+  => relies guarantees modifies;
 
 category Body;
 op body(body: StmtExpr): Body => "\n" body:0;
@@ -199,6 +213,14 @@ op function (name : Ident, parameters: CommaSepBy Parameter,
   body : Option Body) : Procedure =>
   "function " name "(" parameters ")" returnType returnParameters requires invokeOn opaqueSpec body ";";
 
+category Coroutine;
+op coroutine (name: Ident, parameters: CommaSepBy Parameter,
+  yieldType: Option ReturnType,
+  requires: Seq RequiresClause,
+  spec: Option CoroutineSpec,
+  body: Option Body) : Coroutine =>
+  "coroutine " name "(" parameters ")" yieldType requires spec body ";";
+
 op composite (name: Ident, extending: Option Extends, fields: Seq Field, procedures: Seq Procedure): Composite => "composite " name extending " {" fields procedures " }";
 
 category ConstrainedType;
@@ -208,6 +230,7 @@ op constrainedType (name: Ident, valueName: Ident, base: LaurelType,
 
 op compositeCommand(composite: Composite): Command => composite;
 op procedureCommand(procedure: Procedure): Command => procedure;
+op coroutineCommand(coroutine: Coroutine): Command => coroutine;
 op datatypeCommand(datatype: Datatype): Command => datatype;
 op constrainedTypeCommand(ct: ConstrainedType): Command => ct;
 

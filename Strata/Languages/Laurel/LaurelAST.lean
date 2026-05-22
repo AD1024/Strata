@@ -177,6 +177,11 @@ inductive QuantifierMode where
   | Exists
   deriving Repr, BEq, Inhabited
 
+inductive ProcedureKind where
+  | Regular
+  | Coroutine
+  deriving Repr, BEq, Inhabited
+
 mutual
 
 /--
@@ -185,6 +190,8 @@ verification. Unlike separate functions and methods, Laurel uses a single
 general concept that covers both.
 -/
 structure Procedure : Type where
+  /-- Kind of the procedure, either a regular procedure or a coroutine procedure -/
+  kind: ProcedureKind
   /-- The procedure's name. -/
   name : Identifier
   /-- Input parameters with their types. -/
@@ -193,6 +200,10 @@ structure Procedure : Type where
   outputs : List Parameter
   /-- The preconditions that callers must satisfy. -/
   preconditions : List Condition
+  /-- Relies clauses of a coroutine -/
+  relies: List Condition
+  /-- Guarantee clauses of a coroutine -/
+  guarantees: List Condition
   -- TODO: add back determinism together with an implementation
   /-- Optional termination measure for recursive procedures. -/
   decreases : Option (AstNode StmtExpr) -- optionally prove termination
@@ -333,9 +344,11 @@ inductive StmtExpr : Type where
         not allowed in functions.
       - `type`: inferred by the hole type inference pass; `none` means not yet inferred. -/
   | Hole (deterministic : Bool := true) (type : Option (AstNode HighType) := none)
+  /-- Yield expression used inside coroutines -/
+  | Yield (value: Option <| AstNode StmtExpr)
 
 inductive ContractType where
-  | Reads | Modifies | Precondition | PostCondition
+  | Reads | Modifies | Precondition | PostCondition | Relies | Guarantees
 end
 
 @[expose] abbrev HighTypeMd := AstNode HighType
@@ -601,6 +614,9 @@ structure Program where
   /-- Named constants. -/
   constants : List Constant := []
   deriving Inhabited
+
+def Procedure.is_coroutine (p: Procedure): Bool :=
+  match p.kind with | .Coroutine => true | _ => false
 
 end -- public section
 

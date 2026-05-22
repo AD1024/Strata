@@ -398,6 +398,9 @@ def resolveStmtExpr (exprMd : StmtExprMd) : ResolveM StmtExprMd := do
   | .Return val => do
     let val' ← val.attach.mapM (fun a => have := a.property; resolveStmtExpr a.val)
     pure (.Return val')
+  | .Yield val => do
+    let val' ← val.attach.mapM (fun a => have := a.property; resolveStmtExpr a.val)
+    pure (.Yield val')
   | .LiteralInt v => pure (.LiteralInt v)
   | .LiteralBool v => pure (.LiteralBool v)
   | .LiteralString v => pure (.LiteralString v)
@@ -582,16 +585,26 @@ def resolveProcedure (proc : Procedure) : ResolveM Procedure := do
     let inputs' ← proc.inputs.mapM resolveParameter
     let outputs' ← proc.outputs.mapM resolveParameter
     let pres' ← proc.preconditions.mapM (·.mapM resolveStmtExpr)
+    let relies' ← proc.relies.mapM (·.mapM resolveStmtExpr)
+    let guarantees' ← proc.guarantees.mapM (·.mapM resolveStmtExpr)
     let dec' ← proc.decreases.mapM resolveStmtExpr
     let body' ← resolveBody proc.body
     if !proc.isFunctional && body'.isTransparent then
       let diag := diagnosticFromSource proc.name.source
         s!"transparent procedures are not yet supported. Add 'opaque' to make the procedure opaque"
       modify fun s => { s with errors := s.errors.push diag }
+    -- Rely / guarantee clauses are only meaningful on coroutines.
+    if proc.kind == .Regular && (!proc.relies.isEmpty || !proc.guarantees.isEmpty) then
+      let diag := diagnosticFromSource proc.name.source
+        s!"rely/guarantee clauses are only allowed on coroutine declarations; \
+           use 'coroutine {proc.name.text}(...)' instead of 'procedure'"
+      modify fun s => { s with errors := s.errors.push diag }
     let invokeOn' ← proc.invokeOn.mapM resolveStmtExpr
-    return { name := procName', inputs := inputs', outputs := outputs',
+    return { kind := proc.kind, name := procName', inputs := inputs', outputs := outputs',
              isFunctional := proc.isFunctional,
-             preconditions := pres', decreases := dec',
+             preconditions := pres',
+             relies := relies', guarantees := guarantees',
+             decreases := dec',
              invokeOn := invokeOn',
              body := body' }
 
@@ -615,17 +628,26 @@ def resolveInstanceProcedure (typeName : Identifier) (proc : Procedure) : Resolv
     let inputs' ← proc.inputs.mapM resolveParameter
     let outputs' ← proc.outputs.mapM resolveParameter
     let pres' ← proc.preconditions.mapM (·.mapM resolveStmtExpr)
+    let relies' ← proc.relies.mapM (·.mapM resolveStmtExpr)
+    let guarantees' ← proc.guarantees.mapM (·.mapM resolveStmtExpr)
     let dec' ← proc.decreases.mapM resolveStmtExpr
     let body' ← resolveBody proc.body
     if !proc.isFunctional && body'.isTransparent then
       let diag := diagnosticFromSource proc.name.source
         s!"transparent procedures are not yet supported. Add 'opaque' to make the procedure opaque"
       modify fun s => { s with errors := s.errors.push diag }
+    if proc.kind == .Regular && (!proc.relies.isEmpty || !proc.guarantees.isEmpty) then
+      let diag := diagnosticFromSource proc.name.source
+        s!"rely/guarantee clauses are only allowed on coroutine declarations; \
+           use 'coroutine {proc.name.text}(...)' instead of 'procedure'"
+      modify fun s => { s with errors := s.errors.push diag }
     let invokeOn' ← proc.invokeOn.mapM resolveStmtExpr
     modify fun s => { s with instanceTypeName := savedInstType }
-    return { name := procName', inputs := inputs', outputs := outputs',
+    return { kind := proc.kind, name := procName', inputs := inputs', outputs := outputs',
              isFunctional := proc.isFunctional,
-             preconditions := pres', decreases := dec',
+             preconditions := pres',
+             relies := relies', guarantees := guarantees',
+             decreases := dec',
              invokeOn := invokeOn',
              body := body' }
 
@@ -739,6 +761,7 @@ private def collectStmtExpr (map : Std.HashMap Nat ResolvedNode) (expr : StmtExp
     let map := match dec with | some d => collectStmtExpr map d | none => map
     collectStmtExpr map body
   | .Return val => match val with | some v => collectStmtExpr map v | none => map
+  | .Yield val => match val with | some v => collectStmtExpr map v | none => map
   | .Var (.Local _) => map
   | .Var (.Declare param) =>
     let map := register map param.name (.var param.name param.type)
