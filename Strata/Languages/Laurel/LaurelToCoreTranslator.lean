@@ -282,6 +282,8 @@ def translateExpr (expr : StmtExprMd)
   | .Block _ _ =>
       throwExprDiagnostic $ diagnosticFromSource expr.source "block expression should have been lowered in a separate pass" DiagnosticType.StrataBug
   | .Return _ => disallowed expr.source "return expression should be lowered in a separate pass"
+  | .Yield => throwExprDiagnostic $ diagnosticFromSource expr.source "coroutine yield not yet supported by the verification pipeline (Stage 2 not implemented)" DiagnosticType.NotYetImplemented
+  | .Resume _ _ => throwExprDiagnostic $ diagnosticFromSource expr.source "coroutine resume not yet supported by the verification pipeline (Stage 2 not implemented)" DiagnosticType.NotYetImplemented
 
   | .AsType target _ => throwExprDiagnostic $ diagnosticFromSource expr.source "AsType expression translation" DiagnosticType.NotYetImplemented
   | .Assigned _ => throwExprDiagnostic $ diagnosticFromSource expr.source "assigned expression translation" DiagnosticType.NotYetImplemented
@@ -484,6 +486,12 @@ def translateStmt (stmt : StmtExprMd)
           emitDiagnostic $ md.toDiagnostic "Return statement with value should have been eliminated by EliminateValueReturns pass" DiagnosticType.StrataBug
           modify fun s => { s with coreProgramHasSuperfluousErrors := true }
           return [.exit "$body" md]
+  | .Yield =>
+      emitDiagnostic $ md.toDiagnostic "coroutine yield not yet supported by the verification pipeline (Stage 2 not implemented)" DiagnosticType.NotYetImplemented
+      return []
+  | .Resume _ _ =>
+      emitDiagnostic $ md.toDiagnostic "coroutine resume not yet supported by the verification pipeline (Stage 2 not implemented)" DiagnosticType.NotYetImplemented
+      return []
   | .While cond invariants decreasesExpr body =>
       let condExpr ← translateExpr cond
       let invExprs ← invariants.mapM (fun i => do return ("", ← translateExpr i))

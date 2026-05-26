@@ -95,8 +95,33 @@ structure LaurelPass where
   /-- The pass action. -/
   run : Program → SemanticModel → Program × List DiagnosticModel × Statistics
 
+/-- Stage 1 stub: emit a single targeted diagnostic for each coroutine
+    declaration in the program. Coroutines parse and resolve, but the
+    Phase A elaboration that lowers them into composites + `resume`
+    procedures (Stage 2) is not yet implemented; without this pass the
+    downstream Laurel→Core translator would emit a confusing cascade
+    of "yield/resume not yet supported" diagnostics for each yield point.
+    Returns the program unchanged. -/
+private def rejectCoroutines (program : Program) : Program × List DiagnosticModel :=
+  let mkDiag (proc : Procedure) : DiagnosticModel :=
+    diagnosticFromSource proc.name.source
+      s!"coroutine '{proc.name.text}' is parsed but not yet verified \
+         (Phase A elaboration not implemented; rely/guarantee, yield, and resume \
+          are not lowered to Core)"
+      DiagnosticType.NotYetImplemented
+  let isCoroutine (p : Procedure) : Bool := match p.kind with
+    | .Coroutine => true
+    | _ => false
+  let coroutines := program.staticProcedures.filter isCoroutine
+  let diags := coroutines.map mkDiag
+  (program, diags)
+
 /-- The ordered sequence of Laurel-to-Laurel lowering passes. -/
 private def laurelPipeline : Array LaurelPass := #[
+  { name := "RejectCoroutines"
+    run := fun p _m =>
+      let (p', diags) := rejectCoroutines p
+      (p', diags, {}) },
   { name := "FilterNonCompositeModifies"
     run := fun p m =>
       let (p', diags) := filterNonCompositeModifies m p
