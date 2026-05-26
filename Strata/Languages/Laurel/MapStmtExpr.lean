@@ -45,6 +45,10 @@ def mapStmtExprM [Monad m] (f : StmtExprMd → m StmtExprMd) (expr : StmtExprMd)
       (← mapStmtExprM f body), source⟩
   | .Return v =>
     pure ⟨.Return (← v.attach.mapM fun ⟨e, _⟩ => mapStmtExprM f e), source⟩
+  | .Yield => pure ⟨.Yield, source⟩
+  | .Resume target v =>
+    pure ⟨.Resume (← mapStmtExprM f target)
+      (← v.attach.mapM fun ⟨e, _⟩ => mapStmtExprM f e), source⟩
   | .Assign targets value =>
     let targets' ← targets.attach.mapM fun ⟨v, _⟩ => do
       let ⟨vv, vs⟩ := v

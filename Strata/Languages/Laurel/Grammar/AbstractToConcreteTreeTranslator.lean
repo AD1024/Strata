@@ -150,8 +150,11 @@ where
       laurelOp "while" #[stmtExprToArg cond, seqArg invArgs, stmtExprToArg body]
     | .Return (some value) => laurelOp "return" #[stmtExprToArg value]
     | .Return none => laurelOp "return" #[laurelOp "block" #[semicolonSep #[]]]
-    | .Yield none => laurelOp "yield" #[]
-    | .Yield (some value) => laurelOp "yieldValue" #[stmtExprToArg value]
+    | .Yield => laurelOp "yield" #[]
+    | .Resume target none =>
+      laurelOp "call" #[laurelOp "identifier" #[ident "resume"], commaSep #[stmtExprToArg target]]
+    | .Resume target (some value) =>
+      laurelOp "call" #[laurelOp "identifier" #[ident "resume"], commaSep #[stmtExprToArg target, stmtExprToArg value]]
     | .Exit label => laurelOp "exit" #[ident label]
     | .Assert cond =>
       let errOpt := optionArg (cond.summary.map fun msg =>
@@ -330,6 +333,71 @@ private def procedureCommandOp (proc : Procedure) : StrataDDM.Operation :=
     name := { dialect := "Laurel", name := "procedureCommand" }
     args := #[.op (procedureToOp proc)] }
 
+/-- Build a Coroutine concrete-tree op. Matches the grammar's `coroutine`
+    production: `(name, parameters, yields?, resumes?, requires*, spec?, body?)`.
+    `yields x: T` and `resumes y: U` carry the channel bindings; the
+    `coroutineSpec` carries relies, guarantees, and modifies; the body, if
+    any, is whatever `procedureToOp` would have built. -/
+private def coroutineToOp (proc : Procedure) : StrataDDM.Operation :=
+  let params := proc.inputs.map parameterToArg |>.toArray
+  -- Emit a `yields (...)` or `resumes (...)` clause iff the binding list
+  -- is non-empty. The grammar rejects empty parens, so an empty list
+  -- round-trips as the omitted clause.
+  let channelClauseArg (opName : String) (bindings : List Parameter) : Arg :=
+    if bindings.isEmpty then optionArg none
+    else
+      let paramsArr := bindings.map parameterToArg |>.toArray
+      optionArg (some (laurelOp opName #[commaSep paramsArr]))
+  let yieldsArg := channelClauseArg "yieldsClause" proc.yields
+  let resumesArg := channelClauseArg "resumesClause" proc.resumes
+  -- Pull postconditions and modifies out of the body (coroutines always
+  -- have an Opaque body per parseCoroutine, even when the implementation
+  -- is absent).
+  let (postconds, modifiesList) : List Condition × List StmtExprMd := match proc.body with
+    | .Opaque ps _ ms => (ps, ms)
+    | _ => ([], [])
+  let requiresArgs := proc.preconditions.map requiresClauseToArg |>.toArray
+  let ensuresArgs := postconds.map ensuresClauseToArg |>.toArray
+  let modifiesArgs := if modifiesList.isEmpty then #[] else modifiesClausesToArgs modifiesList
+  -- Emit the spec when any of the three sub-sequences is non-empty;
+  -- otherwise omit it entirely so the round-tripped surface stays clean.
+  let specArg : Arg :=
+    if proc.preconditions.isEmpty && postconds.isEmpty && modifiesList.isEmpty then
+      optionArg none
+    else
+      optionArg (some (laurelOp "coroutineSpec"
+        #[seqArg requiresArgs, seqArg ensuresArgs, seqArg modifiesArgs]))
+  let bodyArg : Arg := match proc.body with
+    | .Opaque _ (some impl) _ =>
+      optionArg (some (laurelOp "body" #[stmtExprToArg impl]))
+    | .Transparent body =>
+      optionArg (some (laurelOp "body" #[stmtExprToArg body]))
+    | .External =>
+      optionArg (some (laurelOp "externalBody"))
+    | _ => optionArg none
+  { ann := sr
+    name := { dialect := "Laurel", name := "coroutine" }
+    args := #[
+      ident proc.name.text,
+      commaSep params,
+      yieldsArg,
+      resumesArg,
+      specArg,
+      bodyArg
+    ] }
+
+private def coroutineCommandOp (proc : Procedure) : StrataDDM.Operation :=
+  { ann := sr
+    name := { dialect := "Laurel", name := "coroutineCommand" }
+    args := #[.op (coroutineToOp proc)] }
+
+/-- Dispatch on a Procedure's kind to emit either a procedureCommand or
+    coroutineCommand op. -/
+private def procOrCoroutineCommandOp (proc : Procedure) : StrataDDM.Operation :=
+  match proc.kind with
+  | .Coroutine => coroutineCommandOp proc
+  | .Regular => procedureCommandOp proc
+
 /-- Convert a Laurel.Program to a StrataDDM.Program (DDM concrete syntax tree).
     The resulting program can be formatted using `StrataDDM.Program.format` to
     produce Laurel source text.
@@ -337,7 +405,7 @@ private def procedureCommandOp (proc : Procedure) : StrataDDM.Operation :=
     grammar has no top-level commands for them. -/
 def programToStrata (prog : Laurel.Program) : StrataDDM.Program :=
   let typeOps := prog.types.map typeDefinitionToOp |>.toArray
-  let procOps := prog.staticProcedures.map procedureCommandOp |>.toArray
+  let procOps := prog.staticProcedures.map procOrCoroutineCommandOp |>.toArray
   StrataDDM.Program.create Laurel_map "Laurel" (typeOps ++ procOps)
 
 /-- Format a Laurel program by converting to DDM concrete syntax and using the grammar-based formatter.

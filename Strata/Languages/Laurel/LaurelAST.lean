@@ -191,19 +191,30 @@ general concept that covers both.
 -/
 structure Procedure : Type where
   /-- Kind of the procedure, either a regular procedure or a coroutine procedure -/
-  kind: ProcedureKind
+  kind: ProcedureKind := .Regular
   /-- The procedure's name. -/
   name : Identifier
   /-- Input parameters with their types. -/
   inputs : List Parameter
   /-- Output parameters with their types. Multiple outputs are supported. -/
   outputs : List Parameter
-  /-- The preconditions that callers must satisfy. -/
+  /-- The preconditions that callers must satisfy.
+      For coroutines, fires on every entry (spawn and every resume);
+      conjuncts that mention only spawn arguments are still checked at
+      every resume but are trivially preserved by their immutability. -/
   preconditions : List Condition
-  /-- Relies clauses of a coroutine -/
-  relies: List Condition
-  /-- Guarantee clauses of a coroutine -/
-  guarantees: List Condition
+  /-- The outgoing-channel bindings declared by `yields (x1: T1, ...)`.
+      Names are in scope inside the body and inside the `ensures`
+      clauses (interpreted per-yield in coroutine context). Empty for
+      non-coroutine procedures and for coroutines that omit the clause.
+      The grammar rejects empty parens. -/
+  yields: List Parameter := []
+  /-- The incoming-channel bindings declared by `resumes (y1: U1, ...)`.
+      Names are in scope inside the `requires` clauses (interpreted
+      per-resume in coroutine context); the body retrieves resumed
+      values via the expression-form of `yield`. Empty for non-coroutine
+      procedures and for coroutines that omit the clause. -/
+  resumes: List Parameter := []
   -- TODO: add back determinism together with an implementation
   /-- Optional termination measure for recursive procedures. -/
   decreases : Option (AstNode StmtExpr) -- optionally prove termination
@@ -344,8 +355,23 @@ inductive StmtExpr : Type where
         not allowed in functions.
       - `type`: inferred by the hole type inference pass; `none` means not yet inferred. -/
   | Hole (deterministic : Bool := true) (type : Option (AstNode HighType) := none)
-  /-- Yield expression used inside coroutines -/
-  | Yield (value: Option <| AstNode StmtExpr)
+  /-- Yield expression used inside coroutines.
+
+      Statement position: suspends the coroutine; the resumed value is dropped.
+      Expression position (`z := yield`): suspends; evaluates to the value the
+      next `resume(co, v)` sends in (type matches the coroutine's `resumes`
+      binding).
+
+      To yield a value outward, the user assigns it to the coroutine's
+      `yields` binding before the suspension: `x := e; yield`. -/
+  | Yield
+  /-- Resume a coroutine instance, optionally sending it a value.
+      `target` evaluates to the coroutine instance to resume.
+      `value` is the value sent into the coroutine (the binding for the
+      yield expression that suspended it); `none` for a unit-valued resume.
+      As a statement, the resumed value (the next yield's payload) is dropped;
+      in expression position (`x := resume(g, v)`) it is bound to `x`. -/
+  | Resume (target : AstNode StmtExpr) (value : Option (AstNode StmtExpr))
 
 inductive ContractType where
   | Reads | Modifies | Precondition | PostCondition | Relies | Guarantees
