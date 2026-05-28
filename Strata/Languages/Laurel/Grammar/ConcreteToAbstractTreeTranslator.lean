@@ -476,21 +476,56 @@ def translateEnsuresClauses (arg : Arg) : TransM (List Condition) := do
     pure allEnsures
   | _ => pure []
 
-/-- Parse a `coroutineSpec` op into its three sub-sequences. The grammar
-    shape is `(requires: Seq RequiresClause, ensures: Seq EnsuresClause,
-    modifies: Seq ModifiesClause)`; the temporal semantics (per-resume /
-    per-yield) are kind-determined, not keyword-determined. -/
+/-- Translate a sequence of `yieldRequiresClause`/`yieldEnsuresClause` ops.
+    The two share their grammar shape with `requiresClause`/`ensuresClause`
+    (a condition plus an optional error summary); only the wrapping op
+    name differs. -/
+private def translateYieldClauses (arg : Arg)
+    (opName : Strata.QualifiedIdent) : TransM (List Condition) := do
+  match arg with
+  | .seq _ _ args => do
+    let mut allClauses : List Condition := []
+    for clauseArg in args do
+      match clauseArg with
+      | .op clauseOp =>
+        if clauseOp.name == opName then
+          match clauseOp.args with
+          | #[exprArg, errMsgArg] =>
+            let expr ← translateStmtExpr exprArg
+            let summary ← match errMsgArg with
+              | .option _ (some (.op errOp)) => match errOp.name, errOp.args with
+                | q`Laurel.errorSummary, #[strArg] => do
+                  let msg ← translateString strArg
+                  pure (some msg)
+                | _, _ => pure none
+              | _ => pure none
+            allClauses := allClauses ++ [{ condition := expr, summary }]
+          | _ => TransM.error s!"Expected {repr opName} with 2 args"
+        else
+          TransM.error s!"Expected {repr opName}, got {repr clauseOp.name}"
+      | _ => TransM.error s!"Expected {repr opName} in clause sequence"
+    pure allClauses
+  | _ => pure []
+
+/-- Parse a `coroutineSpec` op into its five sub-sequences. The grammar
+    shape is `(requires, ensures, yieldRequires, yieldEnsures, modifies)`:
+      * `requires`/`ensures` carry construction preconditions and halt
+        postconditions (whole-coroutine, like a regular procedure);
+      * `yieldRequires`/`yieldEnsures` carry per-yield rely/guarantee
+        obligations (the rely-guarantee discipline). -/
 def translateCoroutineSpec (arg : Arg)
-    : TransM (List Condition × List Condition × List StmtExprMd) := do
+    : TransM (List Condition × List Condition × List Condition × List Condition × List StmtExprMd) := do
   match arg with
   | .op op => match op.name, op.args with
-    | q`Laurel.coroutineSpec, #[reqArg, ensArg, modArg] =>
+    | q`Laurel.coroutineSpec, #[reqArg, ensArg, yReqArg, yEnsArg, modArg] =>
       let r ← translateRequiresClauses reqArg
       let e ← translateEnsuresClauses ensArg
+      let yr ← translateYieldClauses yReqArg q`Laurel.yieldRequiresClause
+      let ye ← translateYieldClauses yEnsArg q`Laurel.yieldEnsuresClause
       let m ← translateModifiesClauses modArg
-      pure (r, e, m)
-    | _, _ => pure ([], [], [])
-  | _ => pure ([], [], [])
+      pure (r, e, yr, ye, m)
+    | _, _ => pure ([], [], [], [], [])
+  | _ => pure ([], [], [], [], [])
 
 def parseProcedure (arg : Arg) : TransM Procedure := do
   let .op op := arg
@@ -609,12 +644,12 @@ def parseCoroutine (arg : Arg) : TransM Procedure := do
     let parameters ← translateParameters paramArg
     let yields ← parseChannelClause yieldsArg q`Laurel.yieldsClause
     let resumes ← parseChannelClause resumesArg q`Laurel.resumesClause
-    -- The coroutine's `requires`/`ensures`/`modifies` live inside the
-    -- optional `coroutineSpec` block. Their temporal semantics (per-resume
-    -- / per-yield) are determined by `kind`, not by separate keywords.
-    let (preconditions, postconditions, modifies) ← match specArg with
+    -- The coroutine's spec carries five clause families: construction
+    -- `requires`, halt `ensures`, per-yield rely (`yield requires`),
+    -- per-yield guarantee (`yield ensures`), and `modifies`.
+    let (preconditions, postconditions, yieldRequires, yieldEnsures, modifies) ← match specArg with
       | .option _ (some specOp) => translateCoroutineSpec specOp
-      | _ => pure ([], [], [])
+      | _ => pure ([], [], [], [], [])
     -- Optional body. `externalBody` is bodyless; otherwise pull out the body
     -- StmtExpr. A coroutine without a body is abstract (spec-only).
     let isExternal ← match bodyArg with
@@ -641,6 +676,8 @@ def parseCoroutine (arg : Arg) : TransM Procedure := do
       inputs := parameters
       outputs := []   -- coroutines flow values via `yields`, not `outputs`
       preconditions := preconditions
+      yieldRequires := yieldRequires
+      yieldEnsures := yieldEnsures
       yields := yields
       resumes := resumes
       decreases := none
