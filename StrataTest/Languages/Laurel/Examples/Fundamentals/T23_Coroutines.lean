@@ -155,8 +155,7 @@ procedure driver()
 
 /-! ## `resume` in expression position binds the yielded value.
 
-`x := resume(co)` exercises the expression-position arm. The result type
-is `Unknown` at Stage 1 (LaurelTypes deliberately defers it to Stage 2);
+`x := resume(co)` exercises the expression-position arm;
 this test only checks that the construct parses and resolves. -/
 
 def resumeBindsResult := r"
@@ -255,7 +254,7 @@ coroutine countTo(limit: int) yields (x: int)
     invariant i >= 0
   {
     if i > 100 then {
-      return    // early termination from inside a nested branch
+      return
     };
     x := i;
     yield;
@@ -266,6 +265,171 @@ coroutine countTo(limit: int) yields (x: int)
 
 #guard_msgs (drop info, error) in
 #eval testInputWithOffset "BareReturnInCoroutine" bareReturnInCoroutine 14 processResolution
+
+/-! ## Lock server: message-passing concurrency between two coroutines.
+
+Modelled after the P spec at
+github.com/AD1024/PInfer-Benchmarks/blob/main/lockserver/PSrc/System.p:
+the lock server and each node are independent state machines that
+communicate exclusively via events. Here the events are the
+constructors of a tagged-union `Message` datatype, and the
+coroutines `lockServer` and `participant` exchange messages through
+yield/resume.
+
+Protocol:
+  * `MLock(node)`            — participant requests the lock
+  * `MUnlock(node, epoch)`   — participant releases the lock
+  * `MGrant(node, epoch)`    — server confirms a grant (with epoch tag)
+  * `MNone()`                — idle / no reply this turn
+
+Each coroutine owns a small composite (`ServerState` / `ParticipantState`)
+to make its `holdsLock` flag visible in spec position; per-coroutine
+state is otherwise disjoint. Both use the Python-style
+`got := yield` pattern to *emit* the current value of the `yields`
+binding and, on resume, *receive* the resumed value into `got`.
+
+Per-yield obligations use the dedicated `yield_ensures` keyword
+(rely/guarantee semantics). Plain `requires`/`ensures` keep their
+construction/halt meaning even on coroutines:
+  * `lockServer`: `yield_ensures` — if it is granting
+    (`reply = MGrant(...)`) then it no longer holds the lock — the
+    lock has been transferred.
+  * `participant`: `yield_ensures` — if it is releasing
+    (`req = MUnlock(...)`) then it no longer holds the lock — release
+    happens before the yield.
+
+The driver `runLockServer` plays the role of the P runtime / message
+bus. It takes a `ParticipantList` (a recursive datatype of
+participants — the lock-server protocol is parametric in the number of
+participants) and on each round walks the list via `stepParticipants`,
+shuttling each participant's `req` through the server and delivering
+the server's `reply` back to the same participant the same turn. -/
+
+def lockServerProgram := r"
+datatype Message {
+  MLock(lockNode: int),
+  MUnlock(unlockNode: int, unlockEpoch: int),
+  MGrant(grantNode: int, grantEpoch: int),
+  MNone()
+}
+
+composite ServerState {
+  var holdsLock: bool
+  var ep: int
+}
+
+composite ParticipantState {
+  var holdsLock: bool
+  var ep: int
+}
+
+coroutine lockServer(s: ServerState)
+  yields (reply: Message)
+  resumes (req: Message)
+  ensures false
+  yield_requires s == old(s)
+  yield_ensures Message..isMGrant(reply) ==> !s#holdsLock
+  modifies s
+{
+  var got: Message := MNone();
+  reply := MNone();
+
+  while (true)
+    invariant s#ep >= 0
+  {
+    got := yield;
+    if Message..isMLock(got) then {
+      if s#holdsLock then {
+        s#holdsLock := false;
+        reply := MGrant(Message..lockNode(got), s#ep)
+      } else {
+        reply := MNone()
+      }
+    } else {
+      if Message..isMUnlock(got) then {
+        if !s#holdsLock & s#ep == Message..unlockEpoch(got) then {
+          s#holdsLock := true;
+          s#ep := Message..unlockEpoch(got) + 1
+        };
+        reply := MNone()
+      } else {
+        reply := MNone()
+      }
+    }
+  }
+};
+
+coroutine participant(id: int, maxAttempts: int, ps: ParticipantState)
+  yields (req: Message)
+  resumes (reply: Message)
+  requires id > 0 && 0 < maxAttempts
+  yield_requires ps == old(ps)
+  yield_ensures Message..isMUnlock(req) ==> !ps#holdsLock
+  modifies ps
+{
+  var attempts: int := 0;
+  var got: Message := MNone();
+
+  while (attempts < maxAttempts)
+    invariant 0 <= attempts && attempts <= maxAttempts
+  {
+    req := MLock(id);
+    got := yield;
+    if Message..isMGrant(got) & !ps#holdsLock then {
+      ps#ep := Message..grantEpoch(got);
+      ps#holdsLock := true;
+      assert ps#holdsLock;
+      ps#holdsLock := false;
+      req := MUnlock(id, ps#ep);
+      yield;
+      return
+    };
+    attempts := attempts + 1
+  }
+};
+
+datatype ParticipantList {
+  PNil(),
+  PCons(head: participant, tail: ParticipantList)
+}
+
+procedure stepParticipants(server: lockServer, ps: ParticipantList)
+  opaque
+{
+  if ParticipantList..isPCons(ps) then {
+    var stepHead: bool := <??>;
+    if stepHead then {
+      var p: participant := ParticipantList..head(ps);
+      var req: Message := resume(p, MNone());
+      var reply: Message := resume(server, req);
+      var ack: Message := resume(p, reply)
+    };
+    stepParticipants(server, ParticipantList..tail(ps))
+  }
+};
+
+procedure runLockServer(ps: ParticipantList)
+  opaque
+{
+  var s: ServerState := new ServerState;
+  s#holdsLock := true;
+  s#ep := 0;
+
+  var server: lockServer := lockServer(s);
+  var warmup: Message := resume(server, MNone());
+
+  var rounds: int := 10;
+  while (rounds > 0)
+    invariant rounds >= 0
+  {
+    stepParticipants(server, ps);
+    rounds := rounds - 1
+  }
+};
+"
+
+#guard_msgs (drop info, error) in
+#eval testInputWithOffset "LockServer" lockServerProgram 14 processResolution
 
 /-! ## Pipeline rejection: each coroutine triggers exactly one diagnostic.
 
