@@ -174,17 +174,17 @@ op requiresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): RequiresCl
 category EnsuresClause;
 op ensuresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): EnsuresClause => "\n  ensures " cond:0 errorMessage;
 
-// Coroutine-only per-yield obligations. `yield_requires` is the
-// rely: a property the caller restores between yields (so the
-// coroutine can assume it whenever it resumes). `yield_ensures` is
-// the guarantee: a property the coroutine establishes at every
-// yield. Plain `requires`/`ensures` on a coroutine remain the
-// construction precondition / halt postcondition respectively.
-category YieldRequiresClause;
-op yieldRequiresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): YieldRequiresClause => "\n  yield_requires " cond:0 errorMessage;
+// Coroutine-only per-yield obligations. `relies` is the rely: a
+// property the caller restores between yields (so the coroutine can
+// assume it whenever it resumes). `guarantees` is the guarantee: a
+// property the coroutine establishes at every yield. Plain
+// `requires`/`ensures` on a coroutine remain the construction
+// precondition / halt postcondition respectively.
+category ReliesClause;
+op reliesClause(cond: StmtExpr, errorMessage: Option ErrorSummary): ReliesClause => "\n  relies " cond:0 errorMessage;
 
-category YieldEnsuresClause;
-op yieldEnsuresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): YieldEnsuresClause => "\n  yield_ensures " cond:0 errorMessage;
+category GuaranteesClause;
+op guaranteesClause(cond: StmtExpr, errorMessage: Option ErrorSummary): GuaranteesClause => "\n  guarantees " cond:0 errorMessage;
 
 category ModifiesClause;
 op modifiesClause(refs: CommaSepBy StmtExpr): ModifiesClause => "\n  modifies " refs;
@@ -198,22 +198,21 @@ op opaqueSpec(ensures: Seq EnsuresClause, modifies: Seq ModifiesClause): OpaqueS
   "\n  opaque" ensures modifies;
 
 // Coroutine spec block. Carries five sub-sequences:
-//   * `requires`        — construction precondition (checked at spawn).
-//   * `ensures`         — halt postcondition (checked when the
-//                         coroutine returns / falls off the end).
-//   * `yield requires`  — per-yield rely: assumed on entry to the body
-//                         and re-assumed after every `yield`. The
-//                         caller is obliged to re-establish it between
-//                         yields.
-//   * `yield ensures`   — per-yield guarantee: must hold at every
-//                         `yield` site.
-//   * `modifies`        — frame, as for procedures.
+//   * `requires`    — construction precondition (checked at spawn).
+//   * `ensures`     — halt postcondition (checked when the
+//                     coroutine returns / falls off the end).
+//   * `relies`      — per-yield rely: assumed on entry to the body
+//                     and re-assumed after every `yield`. The caller
+//                     is obliged to re-establish it between yields.
+//   * `guarantees`  — per-yield guarantee: must hold at every
+//                     `yield` site.
+//   * `modifies`    — frame, as for procedures.
 category CoroutineSpec;
 op coroutineSpec(requires: Seq RequiresClause, ensures: Seq EnsuresClause,
-                 yieldRequires: Seq YieldRequiresClause,
-                 yieldEnsures: Seq YieldEnsuresClause,
+                 relies: Seq ReliesClause,
+                 guarantees: Seq GuaranteesClause,
                  modifies: Seq ModifiesClause): CoroutineSpec
-  => requires ensures yieldRequires yieldEnsures modifies;
+  => requires ensures relies guarantees modifies;
 
 category Body;
 op body(body: StmtExpr): Body => "\n" body:0;

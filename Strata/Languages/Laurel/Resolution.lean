@@ -613,30 +613,30 @@ def resolveProcedure (proc : Procedure) : ResolveM Procedure := do
     let outputs' ← proc.outputs.mapM resolveParameter
     -- Coroutine channel bindings:
     --   `yields (x: T)`  → `x` in scope inside body, `ensures` (halt
-    --                      postcondition), and `yield ensures` (per-
-    --                      yield guarantee).
-    --   `resumes (y: U)` → `y` in scope inside `yield requires` (per-
-    --                      yield rely); the body retrieves resumed
-    --                      values via the expression form of `yield`.
+    --                      postcondition), and `guarantees` (per-yield
+    --                      guarantee).
+    --   `resumes (y: U)` → `y` in scope inside `relies` (per-yield
+    --                      rely); the body retrieves resumed values
+    --                      via the expression form of `yield`.
     let yields' ← proc.yields.mapM resolveParameter
     let resumes' ← proc.resumes.mapM resolveParameter
     -- `requires` is the construction precondition; resolved before any
     -- channel bindings come into scope.
     let pres' ← proc.preconditions.mapM (·.mapM resolveStmtExpr)
     -- Per-yield rely sees `resumes` bindings.
-    let yieldReqs' ← proc.yieldRequires.mapM (·.mapM resolveStmtExpr)
+    let relies' ← proc.relies.mapM (·.mapM resolveStmtExpr)
     -- Per-yield guarantee sees `yields` bindings.
-    let yieldEnss' ← proc.yieldEnsures.mapM (·.mapM resolveStmtExpr)
+    let guarantees' ← proc.guarantees.mapM (·.mapM resolveStmtExpr)
     let dec' ← proc.decreases.mapM resolveStmtExpr
     let body' ← resolveBody proc.body
     if !proc.isFunctional && body'.isTransparent then
       let diag := diagnosticFromSource proc.name.source
         s!"transparent procedures are not yet supported. Add 'opaque' to make the procedure opaque"
       modify fun s => { s with errors := s.errors.push diag }
-    -- `yield requires` / `yield ensures` are coroutine-only.
-    if proc.kind == .Regular && (!proc.yieldRequires.isEmpty || !proc.yieldEnsures.isEmpty) then
+    -- `relies` / `guarantees` are coroutine-only.
+    if proc.kind == .Regular && (!proc.relies.isEmpty || !proc.guarantees.isEmpty) then
       let diag := diagnosticFromSource proc.name.source
-        s!"`yield_requires` / `yield_ensures` clauses are only allowed on coroutine declarations; \
+        s!"`relies` / `guarantees` clauses are only allowed on coroutine declarations; \
            use 'coroutine {proc.name.text}(...)' instead of 'procedure'"
       modify fun s => { s with errors := s.errors.push diag }
     let invokeOn' ← proc.invokeOn.mapM resolveStmtExpr
@@ -644,7 +644,7 @@ def resolveProcedure (proc : Procedure) : ResolveM Procedure := do
     return { kind := proc.kind, name := procName', inputs := inputs', outputs := outputs',
              isFunctional := proc.isFunctional,
              preconditions := pres',
-             yieldRequires := yieldReqs', yieldEnsures := yieldEnss',
+             relies := relies', guarantees := guarantees',
              yields := yields', resumes := resumes',
              decreases := dec',
              invokeOn := invokeOn',
@@ -673,17 +673,17 @@ def resolveInstanceProcedure (typeName : Identifier) (proc : Procedure) : Resolv
     let yields' ← proc.yields.mapM resolveParameter
     let resumes' ← proc.resumes.mapM resolveParameter
     let pres' ← proc.preconditions.mapM (·.mapM resolveStmtExpr)
-    let yieldReqs' ← proc.yieldRequires.mapM (·.mapM resolveStmtExpr)
-    let yieldEnss' ← proc.yieldEnsures.mapM (·.mapM resolveStmtExpr)
+    let relies' ← proc.relies.mapM (·.mapM resolveStmtExpr)
+    let guarantees' ← proc.guarantees.mapM (·.mapM resolveStmtExpr)
     let dec' ← proc.decreases.mapM resolveStmtExpr
     let body' ← resolveBody proc.body
     if !proc.isFunctional && body'.isTransparent then
       let diag := diagnosticFromSource proc.name.source
         s!"transparent procedures are not yet supported. Add 'opaque' to make the procedure opaque"
       modify fun s => { s with errors := s.errors.push diag }
-    if proc.kind == .Regular && (!proc.yieldRequires.isEmpty || !proc.yieldEnsures.isEmpty) then
+    if proc.kind == .Regular && (!proc.relies.isEmpty || !proc.guarantees.isEmpty) then
       let diag := diagnosticFromSource proc.name.source
-        s!"`yield_requires` / `yield_ensures` clauses are only allowed on coroutine declarations; \
+        s!"`relies` / `guarantees` clauses are only allowed on coroutine declarations; \
            use 'coroutine {proc.name.text}(...)' instead of 'procedure'"
       modify fun s => { s with errors := s.errors.push diag }
     let invokeOn' ← proc.invokeOn.mapM resolveStmtExpr
@@ -691,7 +691,7 @@ def resolveInstanceProcedure (typeName : Identifier) (proc : Procedure) : Resolv
     return { kind := proc.kind, name := procName', inputs := inputs', outputs := outputs',
              isFunctional := proc.isFunctional,
              preconditions := pres',
-             yieldRequires := yieldReqs', yieldEnsures := yieldEnss',
+             relies := relies', guarantees := guarantees',
              yields := yields', resumes := resumes',
              decreases := dec',
              invokeOn := invokeOn',
@@ -880,8 +880,8 @@ private def collectProcedure (map : Std.HashMap Nat ResolvedNode) (proc : Proced
   let map := proc.inputs.foldl collectParameter map
   let map := proc.outputs.foldl collectParameter map
   let map := proc.preconditions.foldl (fun map c => collectStmtExpr map c.condition) map
-  let map := proc.yieldRequires.foldl (fun map c => collectStmtExpr map c.condition) map
-  let map := proc.yieldEnsures.foldl (fun map c => collectStmtExpr map c.condition) map
+  let map := proc.relies.foldl (fun map c => collectStmtExpr map c.condition) map
+  let map := proc.guarantees.foldl (fun map c => collectStmtExpr map c.condition) map
   let map := match proc.decreases with | some d => collectStmtExpr map d | none => map
   collectBody map proc.body
 

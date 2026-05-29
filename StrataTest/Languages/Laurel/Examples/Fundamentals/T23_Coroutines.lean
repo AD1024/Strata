@@ -76,14 +76,30 @@ coroutine empty()
 Smoke test for `yield` (no value) inside a `while` body. -/
 
 def counterCoroutine := r"
-coroutine counter()
+coroutine counter() yields (x: int)
+  ensures false
+  guarantees x >= 0
 {
   var i: int := 0;
-  while (i < 3)
+  while (true)
     invariant i >= 0
   {
-    i := i + 1;
-    yield
+    x := i;
+    yield;
+    i := i + 1
+  }
+};
+
+procedure driver(upper: int)
+  requires upper >= 0
+  opaque
+{
+  var co: counter := counter();
+  var s: int := 0;
+  while (s < upper)
+    invariant s >= 0
+  {
+    s := s + resume(co)
   }
 };
 "
@@ -288,13 +304,13 @@ state is otherwise disjoint. Both use the Python-style
 `got := yield` pattern to *emit* the current value of the `yields`
 binding and, on resume, *receive* the resumed value into `got`.
 
-Per-yield obligations use the dedicated `yield_ensures` keyword
-(rely/guarantee semantics). Plain `requires`/`ensures` keep their
-construction/halt meaning even on coroutines:
-  * `lockServer`: `yield_ensures` — if it is granting
+Per-yield obligations use the dedicated `relies` / `guarantees`
+keywords (rely/guarantee semantics). Plain `requires`/`ensures` keep
+their construction/halt meaning even on coroutines:
+  * `lockServer`: `guarantees` — if it is granting
     (`reply = MGrant(...)`) then it no longer holds the lock — the
     lock has been transferred.
-  * `participant`: `yield_ensures` — if it is releasing
+  * `participant`: `guarantees` — if it is releasing
     (`req = MUnlock(...)`) then it no longer holds the lock — release
     happens before the yield.
 
@@ -327,8 +343,8 @@ coroutine lockServer(s: ServerState)
   yields (reply: Message)
   resumes (req: Message)
   ensures false
-  yield_requires s == old(s)
-  yield_ensures Message..isMGrant(reply) ==> !s#holdsLock
+  relies s == old(s)
+  guarantees Message..isMGrant(reply) ==> !s#holdsLock
   modifies s
 {
   var got: Message := MNone();
@@ -363,8 +379,8 @@ coroutine participant(id: int, maxAttempts: int, ps: ParticipantState)
   yields (req: Message)
   resumes (reply: Message)
   requires id > 0 && 0 < maxAttempts
-  yield_requires ps == old(ps)
-  yield_ensures Message..isMUnlock(req) ==> !ps#holdsLock
+  relies ps == old(ps)
+  guarantees Message..isMUnlock(req) ==> !ps#holdsLock
   modifies ps
 {
   var attempts: int := 0;

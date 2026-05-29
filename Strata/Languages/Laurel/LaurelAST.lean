@@ -204,28 +204,28 @@ structure Procedure : Type where
       the coroutine value is first created) and is *not* re-checked at
       each resume. -/
   preconditions : List Condition
-  /-- Coroutine-only per-yield rely: a property the caller is required
-      to (re-)establish between yields, and which the body may assume
-      on entry and immediately after every `yield`. Empty for non-
-      coroutine procedures. The `resumes (y: U)` binding is in scope
-      here. -/
-  yieldRequires : List Condition := []
-  /-- Coroutine-only per-yield guarantee: a property the body must
+  /-- Coroutine-only `relies` clause: a property the caller is
+      required to (re-)establish between yields, and which the body
+      may assume on entry and immediately after every `yield`. Empty
+      for non-coroutine procedures. The `resumes (y: U)` binding is in
+      scope here. -/
+  relies : List Condition := []
+  /-- Coroutine-only `guarantees` clause: a property the body must
       establish at every `yield` site (and at the implicit yield on
       construction-spec exit, if any). Empty for non-coroutine
       procedures. The `yields (x: T)` binding is in scope here. -/
-  yieldEnsures : List Condition := []
+  guarantees : List Condition := []
   /-- The outgoing-channel bindings declared by `yields (x1: T1, ...)`.
-      Names are in scope inside the body, inside the `yield ensures`
+      Names are in scope inside the body, inside the `guarantees`
       clauses (per-yield guarantee), and inside the halt `ensures`
       clauses if the body assigns to them before falling off. Empty
       for non-coroutine procedures and for coroutines that omit the
       clause. The grammar rejects empty parens. -/
   yields: List Parameter := []
   /-- The incoming-channel bindings declared by `resumes (y1: U1, ...)`.
-      Names are in scope inside the `yield requires` clauses (per-yield
-      rely); the body retrieves resumed values via the expression-form
-      of `yield`. Empty for non-coroutine procedures and for coroutines
+      Names are in scope inside the `relies` clauses (per-yield rely);
+      the body retrieves resumed values via the expression-form of
+      `yield`. Empty for non-coroutine procedures and for coroutines
       that omit the clause. -/
   resumes: List Parameter := []
   -- TODO: add back determinism together with an implementation

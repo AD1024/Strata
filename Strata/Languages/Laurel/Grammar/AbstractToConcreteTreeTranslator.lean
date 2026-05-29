@@ -215,15 +215,15 @@ private def ensuresClauseToArg (c : Condition) : Arg :=
     laurelOp "errorSummary" #[.strlit sr msg])
   laurelOp "ensuresClause" #[stmtExprToArg c.condition, errOpt]
 
-private def yieldRequiresClauseToArg (c : Condition) : Arg :=
+private def reliesClauseToArg (c : Condition) : Arg :=
   let errOpt := optionArg (c.summary.map fun msg =>
     laurelOp "errorSummary" #[.strlit sr msg])
-  laurelOp "yieldRequiresClause" #[stmtExprToArg c.condition, errOpt]
+  laurelOp "reliesClause" #[stmtExprToArg c.condition, errOpt]
 
-private def yieldEnsuresClauseToArg (c : Condition) : Arg :=
+private def guaranteesClauseToArg (c : Condition) : Arg :=
   let errOpt := optionArg (c.summary.map fun msg =>
     laurelOp "errorSummary" #[.strlit sr msg])
-  laurelOp "yieldEnsuresClause" #[stmtExprToArg c.condition, errOpt]
+  laurelOp "guaranteesClause" #[stmtExprToArg c.condition, errOpt]
 
 private def modifiesClausesToArgs (modifies : List StmtExprMd) : Array Arg :=
   let (wildcards, specific) := modifies.partition StmtExprMd.isWildcard
@@ -346,8 +346,8 @@ private def procedureCommandOp (proc : Procedure) : StrataDDM.Operation :=
 /-- Build a Coroutine concrete-tree op. Matches the grammar's `coroutine`
     production: `(name, parameters, yields?, resumes?, spec?, body?)`.
     `yields x: T` and `resumes y: U` carry the channel bindings; the
-    `coroutineSpec` carries `requires`, `ensures`, `yield requires`,
-    `yield ensures`, and `modifies`; the body, if any, is whatever
+    `coroutineSpec` carries `requires`, `ensures`, `relies`,
+    `guarantees`, and `modifies`; the body, if any, is whatever
     `procedureToOp` would have built. -/
 private def coroutineToOp (proc : Procedure) : StrataDDM.Operation :=
   let params := proc.inputs.map parameterToArg |>.toArray
@@ -369,20 +369,20 @@ private def coroutineToOp (proc : Procedure) : StrataDDM.Operation :=
     | _ => ([], [])
   let requiresArgs := proc.preconditions.map requiresClauseToArg |>.toArray
   let ensuresArgs := postconds.map ensuresClauseToArg |>.toArray
-  let yieldReqArgs := proc.yieldRequires.map yieldRequiresClauseToArg |>.toArray
-  let yieldEnsArgs := proc.yieldEnsures.map yieldEnsuresClauseToArg |>.toArray
+  let reliesArgs := proc.relies.map reliesClauseToArg |>.toArray
+  let guaranteesArgs := proc.guarantees.map guaranteesClauseToArg |>.toArray
   let modifiesArgs := if modifiesList.isEmpty then #[] else modifiesClausesToArgs modifiesList
   -- Emit the spec when any sub-sequence is non-empty; otherwise omit it
   -- entirely so the round-tripped surface stays clean.
   let specArg : Arg :=
     if proc.preconditions.isEmpty && postconds.isEmpty
-       && proc.yieldRequires.isEmpty && proc.yieldEnsures.isEmpty
+       && proc.relies.isEmpty && proc.guarantees.isEmpty
        && modifiesList.isEmpty then
       optionArg none
     else
       optionArg (some (laurelOp "coroutineSpec"
         #[seqArg requiresArgs, seqArg ensuresArgs,
-          seqArg yieldReqArgs, seqArg yieldEnsArgs,
+          seqArg reliesArgs, seqArg guaranteesArgs,
           seqArg modifiesArgs]))
   let bodyArg : Arg := match proc.body with
     | .Opaque _ (some impl) _ =>

@@ -125,8 +125,8 @@ def mapProcedureM [Monad m] (f : StmtExprMd → m StmtExprMd) (proc : Procedure)
   let proc ← mapProcedureBodiesM f proc
   return { proc with
     preconditions := ← proc.preconditions.mapM (·.mapM f)
-    yieldRequires := ← proc.yieldRequires.mapM (·.mapM f)
-    yieldEnsures := ← proc.yieldEnsures.mapM (·.mapM f)
+    relies := ← proc.relies.mapM (·.mapM f)
+    guarantees := ← proc.guarantees.mapM (·.mapM f)
     decreases := ← proc.decreases.mapM f
     invokeOn := ← proc.invokeOn.mapM f }
 
