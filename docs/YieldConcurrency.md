@@ -9,7 +9,7 @@ type-namespace registration, pretty-print round-trip) is in place. Stage 2
 [Implementation status](#implementation-status) for what's landed.
 
 Strata models concurrency via coroutines with explicit `yield` and a
-per-yield rely/guarantee discipline (`yield_requires` / `yield_ensures`)
+per-yield rely/guarantee discipline (`relies` / `guarantees`)
 over a shared heap. Plain `requires` / `ensures` keep their usual
 construction-precondition / halt-postcondition meaning even on
 coroutines. The frontend is Laurel; the lowering target is Strata
@@ -54,11 +54,11 @@ Stage 2 (not yet implemented) elaborates it into a composite plus a
 coroutine name(p1: T1, ..., pn: Tn)
   yields (x1: U1, ...)         // optional; outgoing channel bindings
   resumes (y1: V1, ...)         // optional; incoming channel bindings
-  requires       <pred>          // construction precondition (at spawn)
-  ensures        <pred>          // halt postcondition (at return / falloff)
-  yield_requires <pred>          // per-yield rely (re-assumed each resume)
-  yield_ensures  <pred>          // per-yield guarantee (asserted each yield)
-  modifies <heap refs>           // (zero or more)
+  requires   <pred>            // construction precondition (at spawn)
+  ensures    <pred>            // halt postcondition (at return / falloff)
+  relies     <pred>            // per-yield rely (re-assumed each resume)
+  guarantees <pred>            // per-yield guarantee (asserted each yield)
+  modifies   <heap refs>       // (zero or more)
 { ... body ... }
 ```
 
@@ -88,15 +88,15 @@ Design notes:
   is no value.
 - Plain `requires` / `ensures` on a coroutine keep their construction
   / halt meaning. The per-yield rely/guarantee discipline uses the
-  dedicated `yield_requires` / `yield_ensures` keywords; this avoids
+  dedicated `relies` / `guarantees` keywords; this avoids
   overloading the existing keywords with kind-determined temporal
   semantics. (An earlier design conflated the two via `kind`; reviewer
   feedback motivated the split.)
 - Multiple clauses of any kind are conjoined.
-- `yield_requires` resolves with the `resumes (y: U)` bindings in
-  scope; `yield_ensures` resolves with the `yields (x: T)` bindings in
+- `relies` resolves with the `resumes (y: U)` bindings in
+  scope; `guarantees` resolves with the `yields (x: T)` bindings in
   scope.
-- `yield_requires` / `yield_ensures` are coroutine-only: applying them
+- `relies` / `guarantees` are coroutine-only: applying them
   to a `procedure` produces a targeted diagnostic.
 
 ## Verification rule
@@ -108,11 +108,11 @@ A coroutine declares four families of predicates:
   procedure-style precondition.
 - **`ensures Q`** (halt) — what holds when the coroutine reaches `return`
   or falls off its body. Standard procedure-style postcondition.
-- **`yield_requires R`** (rely) — what callers must (re-)establish at
+- **`relies R`** (rely) — what callers must (re-)establish at
   *every* entry past the first one — i.e. on every `resume(co, v)`.
   Holds across foreign segments. The `resumes (y: U)` binding is in
   scope.
-- **`yield_ensures G`** (guarantee) — what *I* establish across each of
+- **`guarantees G`** (guarantee) — what *I* establish across each of
   *my* atomic segments: a relation between segment-start heap and
   segment-end heap, plus the value of the outgoing binding `x` at the
   yield. The `yields (x: T)` binding is in scope.
@@ -120,7 +120,7 @@ A coroutine declares four families of predicates:
 `R` is required to be reflexive and transitive, so a single application
 `R(h_old, h_new, y)` summarizes any number of foreign segments.
 
-`old(e)` inside `yield_requires`/`yield_ensures` denotes the value of
+`old(e)` inside `relies`/`guarantees` denotes the value of
 `e` at the start of the current atomic segment, **not** at procedure
 entry. Inside plain `requires`/`ensures` on a coroutine, `old` retains
 its standard "value at procedure entry" meaning. This is the only place
@@ -130,24 +130,24 @@ its standard "value at procedure entry" meaning. This is the only place
 
 When a coroutine reaches `yield`:
 
-1. `assert G(H_snap, h, x)` — every `yield_ensures` holds on the heap
+1. `assert G(H_snap, h, x)` — every `guarantees` holds on the heap
    and on the current value of the outgoing binding `x`.
 2. `havoc h`; havoc a fresh `v : U` representing the next resumed value.
-3. `assume R(H_snap, h, v)` — every `yield_requires` holds, with `y`
+3. `assume R(H_snap, h, v)` — every `relies` holds, with `y`
    substituted by `v`.
 4. The expression-position result of `yield` is `v`. `H_snap := h`.
 
 ### Per-resume call obligation
 
 At a call site `resume(co, v)`, the verifier checks that the
-single-state part of `yield_requires` on `y` (substituted with `v`) is
+single-state part of `relies` on `y` (substituted with `v`) is
 satisfied. The heap part is established by the caller's pipeline
 reasoning.
 
 This is the same shape as a procedure-call precondition; it fires at
 every resume rather than once at entry. (The construction `requires`
 fires once, at spawn time; subsequent `resume(co, v)` calls only check
-`yield_requires`.)
+`relies`.)
 
 ### Pairwise soundness
 
@@ -193,7 +193,7 @@ For each `coroutine c(p₁, …, pₖ) requires R ensures G { body }` Stage 2
 3. The clauses on the source coroutine move onto generated procedures:
    plain `requires` becomes the precondition of the constructor;
    plain `ensures` becomes the postcondition fired only when the
-   `pc := END` branch is taken; `yield_requires` / `yield_ensures`
+   `pc := END` branch is taken; `relies` / `guarantees`
    move verbatim onto `C.resume`. Phase B turns the latter pair into
    Core `assert`/`havoc`/`assume` at `resume`'s boundaries:
 
@@ -258,8 +258,8 @@ A single parameterized coroutine handles every worker:
 ```
 coroutine worker(L: SpinLock, me: int)
   requires       0 <= me & me < L#N
-  yield_requires untouched(L, me) & mutex(L) & lockedIffCS(L)
-  yield_ensures  onlyMy(L, me)    & mutex(L) & lockedIffCS(L)
+  relies     untouched(L, me) & mutex(L) & lockedIffCS(L)
+  guarantees onlyMy(L, me)    & mutex(L) & lockedIffCS(L)
 {
   var done: bool := false;
   while (!done)
@@ -310,7 +310,7 @@ contract, and the same four obligations cover every choice of `N ≥ 1`.
 A second worked example — a message-passing lock server with a
 parametric `ParticipantList`, a non-deterministic scheduler, and the
 full rely/guarantee surface (construction `requires`, halt `ensures`,
-per-yield `yield_ensures`) — lives in
+per-yield `guarantees`) — lives in
 [`T23_Coroutines.lean`](../StrataTest/Languages/Laurel/Examples/Fundamentals/T23_Coroutines.lean).
 Mutual exclusion as a loop invariant is a tracked follow-up: the
 list cell currently carries the coroutine but not its
@@ -350,7 +350,7 @@ formula regardless of `|workers|`.
 #### Grammar ([LaurelGrammar.st](../Strata/Languages/Laurel/Grammar/LaurelGrammar.st))
 
 - New categories: `CoroutineSpec`, `YieldsClause`, `ResumesClause`,
-  `YieldRequiresClause`, `YieldEnsuresClause`.
+  `ReliesClause`, `GuaranteesClause`.
 - New ops:
   - `yield` (single nullary form). Dual-position: as a statement, drops
     the resumed value; as an expression (`z := yield`), evaluates to
@@ -360,15 +360,15 @@ formula regardless of `|workers|`.
   - `yieldsClause(parameters: CommaSepBy Parameter)` — `yields (x: T, ...)`,
     mirrors `returns (...)`.
   - `resumesClause(parameters: CommaSepBy Parameter)` — `resumes (y: U, ...)`.
-  - `yieldRequiresClause` / `yieldEnsuresClause` — the `yield_requires`
-    / `yield_ensures` keywords (dedicated rely / guarantee clauses, no
+  - `reliesClause` / `guaranteesClause` — the `relies`
+    / `guarantees` keywords (dedicated rely / guarantee clauses, no
     keyword overloading).
   - `coroutine` (top-level Coroutine production) and `coroutineCommand`
     (top-level Command wrapper).
-- `coroutineSpec(requires, ensures, yield_requires, yield_ensures, modifies)`.
+- `coroutineSpec(requires, ensures, relies, guarantees, modifies)`.
   Plain `requires` is construction precondition (spawn-time, fires
   once); plain `ensures` is the halt postcondition (return / falloff).
-  `yield_requires` / `yield_ensures` carry the per-yield rely /
+  `relies` / `guarantees` carry the per-yield rely /
   guarantee. `modifies` is the frame.
 - `resume(...)` and `old(...)` reuse the generic `call` production; the
   C→A translator rewrites the matching call shapes into dedicated AST
@@ -381,12 +381,12 @@ formula regardless of `|workers|`.
   - `kind : ProcedureKind`,
   - `yields : List Parameter`,
   - `resumes : List Parameter`,
-  - `yieldRequires : List Condition`,
-  - `yieldEnsures : List Condition`.
+  - `relies : List Condition`,
+  - `guarantees : List Condition`.
 - Coroutine construction `requires` clauses live in the existing
   `preconditions : List Condition` field; halt `ensures` clauses live
   in `Body.Opaque.postconditions`. The new
-  `yieldRequires`/`yieldEnsures` fields carry the per-yield rely /
+  `relies`/`guarantees` fields carry the per-yield rely /
   guarantee predicates.
 - `StmtExpr.Yield` is nullary; the resumed value is read via the
   expression position of `yield`.
@@ -401,16 +401,16 @@ formula regardless of `|workers|`.
   arms for `Yield`, `returnVoid`; `q\`Laurel.call` rewrites
   `resume(...)` (1 or 2 args) and `old(e)` (1 arg) to dedicated AST
   nodes. `translateCoroutineSpec` returns the 5-tuple
-  `(requires, ensures, yieldRequires, yieldEnsures, modifies)`;
+  `(requires, ensures, relies, guarantees, modifies)`;
   `translateYieldClauses` is the shared helper for the two new clause
   ops. `parseChannelClause` rejects empty parens. `parseCoroutine`
   builds a `Procedure` with `kind := .Coroutine`, populating the new
-  `yieldRequires`/`yieldEnsures` fields, and an `Opaque` body carrying
+  `relies`/`guarantees` fields, and an `Opaque` body carrying
   postconditions and modifies. `coroutineCommand` arm in `parseTopLevel`.
 - **A→C** ([AbstractToConcreteTreeTranslator.lean](../Strata/Languages/Laurel/Grammar/AbstractToConcreteTreeTranslator.lean)):
   arms for `Yield`, `Resume`, and `Old`; `Resume` and `Old` reuse the
   generic `call` op. `coroutineToOp` / `coroutineCommandOp` printers
-  emit the new `yield_requires` / `yield_ensures` clauses alongside the
+  emit the new `relies` / `guarantees` clauses alongside the
   existing `requires`/`ensures`/`modifies`; a kind dispatcher emits the
   right top-level command per procedure. Empty-list channel clauses are
   omitted; empty `coroutineSpec` is omitted entirely. `Return none`
@@ -420,15 +420,15 @@ formula regardless of `|workers|`.
 #### Resolution ([Resolution.lean](../Strata/Languages/Laurel/Resolution.lean))
 
 - `resolveProcedure` and `resolveInstanceProcedure` propagate `kind`,
-  `yields`, `resumes`, `yieldRequires`, `yieldEnsures` (the
+  `yields`, `resumes`, `relies`, `guarantees` (the
   requires/ensures/modifies plumbing is the same as for ordinary
   procedures).
-- `yields (x: T)` is in scope inside the body and inside `yield_ensures`
-  / halt `ensures`. `resumes (y: U)` is in scope inside `yield_requires`.
+- `yields (x: T)` is in scope inside the body and inside `guarantees`
+  / halt `ensures`. `resumes (y: U)` is in scope inside `relies`.
   Stage 1.5 does not enforce strict directional scoping (e.g. preventing
-  `y` from leaking into `yield_ensures`); misuse surfaces as a standard
+  `y` from leaking into `guarantees`); misuse surfaces as a standard
   unbound-name diagnostic.
-- Applying `yield_requires` / `yield_ensures` to a non-coroutine
+- Applying `relies` / `guarantees` to a non-coroutine
   `procedure` produces a targeted diagnostic.
 - `resolveStmtExpr` handles `Yield` and `Resume`.
 - `return e` in a coroutine is rejected with a diagnostic pointing the
@@ -481,7 +481,7 @@ Twelve parse-and-resolve tests, plus an end-to-end lock-server example:
 | `CoroutineConsumesResumed` | `z := yield` body-side consumption |
 | `ReturnWithValueInCoroutine` | negative test: `return e` rejected |
 | `BareReturnInCoroutine` | `return` from a nested loop/branch |
-| `LockServer` | end-to-end: `Message` datatype, two coroutines (`lockServer` + `participant`), `yield_ensures` rely/guarantee clauses, recursive `ParticipantList`, non-deterministic scheduler via `<??>` |
+| `LockServer` | end-to-end: `Message` datatype, two coroutines (`lockServer` + `participant`), `guarantees` rely/guarantee clauses, recursive `ParticipantList`, non-deterministic scheduler via `<??>` |
 | `CoroutineRejected` | full pipeline; pins the rejection diagnostic |
 
 ### Stage 2 plan — Phase A elaboration
@@ -500,8 +500,8 @@ registered as a `LaurelPass` *before* `HeapParameterization`:
   `composite C { params; var pc; var H_snap; promotedLocals; outgoing; incoming }`,
   a constructor whose `requires` is the source coroutine's plain
   `requires`, and `procedure C.resume(self : C)` whose `requires`
-  is the source coroutine's `yield_requires` and whose `ensures` is
-  the source coroutine's `yield_ensures`, all copied verbatim with
+  is the source coroutine's `relies` and whose `ensures` is
+  the source coroutine's `guarantees`, all copied verbatim with
   `x` and `y` rewritten to the generated outgoing/incoming fields.
   The source `ensures` (halt postcondition) is asserted along the
   `pc := END` branch only.
@@ -526,7 +526,7 @@ registered as a `LaurelPass` *before* `HeapParameterization`:
 
 - **Translation rule** in
   [`LaurelToCoreTranslator`](../Strata/Languages/Laurel/LaurelToCoreTranslator.lean):
-  for any procedure carrying `yield_requires R` / `yield_ensures G`
+  for any procedure carrying `relies R` / `guarantees G`
   from `kind = .Coroutine`, emit
   `assume R(self#H_snap, heap, y)` at `resume` entry and
   `assert G(H_snap_cur, heap, x); self#H_snap := heap` at `resume`
@@ -554,7 +554,7 @@ Smaller items deliberately deferred from Stage 1.5; none block Stage 2.
   before tightening.
 - **Scope-restriction errors for `x` and `y`.** Stage 1.5 puts the
   channel bindings in scope but does not strictly enforce
-  `x ∈ yield_ensures only` / `y ∈ yield_requires only`. Misuse
+  `x ∈ guarantees only` / `y ∈ relies only`. Misuse
   currently surfaces as an unbound-name diagnostic.
 - **Argument and resume-target type checking.** Spawn calls
   (`producer(args)`) and `resume(co, v)` are not arity- or
