@@ -387,7 +387,6 @@ private def containsYield (expr : StmtExprMd) : Bool :=
   | .LiteralDecimal _ | .New _ | .This | .Abstract | .All | .Hole .. => false
 termination_by sizeOf expr
 decreasing_by
-  all_goals simp_wf
   all_goals (try have := AstNode.sizeOf_val_lt expr)
   all_goals (try have := Condition.sizeOf_condition_lt ‹_›)
   all_goals (try term_by_mem)
@@ -446,20 +445,23 @@ private def emitState (id : Nat) (body : StmtExprMd) : LinM Unit :=
       of the generated `resume` procedure that carries the value passed
       at the call site via `resume(co, v)` — it is per-call data, not
       coroutine state, so it is read as a plain local. -/
-private partial def linearize (naming : FieldNaming) (resumeParam : Option Identifier)
+private def linearize (naming : FieldNaming) (resumeParam : Option Identifier)
     (stmt : StmtExprMd) (next : Nat) : LinM Nat := do
   -- Fast path: a subtree with no yield is one atomic state.
   if !containsYield stmt then
     let id ← freshState
     emitState id (block [stmt, pcAssign next])
     return id
-  match stmt.val with
+  match _h: stmt.val with
   | .Block stmts _ =>
-    -- Thread continuations right-to-left. Empty block ≡ no-op → next.
-    let mut entry := next
-    for s in stmts.reverse do
-      entry ← linearize naming resumeParam s entry
-    return entry
+    -- Thread continuations right-to-left: the last statement's
+    -- continuation is `next`, each earlier statement's continuation is
+    -- the entry of the one after it. Empty block ≡ no-op → next.
+    -- `foldrM` over `.attach` carries the `s ∈ stmts` membership proof
+    -- the termination checker needs, and threads the accumulator exactly
+    -- as `for s in stmts.reverse` did — so state-id order is unchanged.
+    stmts.attach.foldrM (init := next) fun ⟨s, _⟩ cont =>
+      linearize naming resumeParam s cont
   | .Assign targets value =>
     match value.val with
     | .Yield =>
@@ -494,7 +496,7 @@ private partial def linearize (naming : FieldNaming) (resumeParam : Option Ident
       return id
   | .IfThenElse c t e =>
     let thenEntry ← linearize naming resumeParam t next
-    let elseEntry ← match e with
+    let elseEntry ← match _he : e with
       | some eb => linearize naming resumeParam eb next
       | none => pure next
     let id ← freshState
@@ -558,6 +560,106 @@ private partial def linearize (naming : FieldNaming) (resumeParam : Option Ident
     let id ← freshState
     emitState id (block [stmt, pcAssign next])
     return id
+  termination_by sizeOf stmt
+  decreasing_by
+    all_goals (have := AstNode.sizeOf_val_lt stmt)
+    all_goals (simp_all; try term_by_mem)
+    all_goals (cases stmt; simp_all; omega)
+
+
+/-! ### State coalescing
+
+Linearization emits one arm per structural node, so a run of statements
+with no yield between them spreads across several arms linked by pure
+`$pc := k` transitions. At runtime the dispatcher already collapses these
+(a transition falls through and re-dispatches), but the *generated* code
+is fat. The coalescing pass merges a yield-to-yield fragment back into a
+single arm.
+
+A merge fires when arm A **tail-transitions** to B — A's body is a block
+whose last statement is `$pc := B` with no intervening `return` — and B
+has exactly one predecessor (only one `$pc := B` site exists anywhere)
+and B is neither the entry nor the end. Then B's body is spliced in place
+of A's trailing transition and B's arm is deleted. Flattening B's block
+into A lets chains compress to a fixpoint. Merging never crosses a
+suspend (`... ; return`), since a suspend arm's last statement is the
+`return`, not a `$pc :=` — that is exactly the yield boundary we keep. -/
+
+/-- Target of a `$pc := k` statement, if `s` is precisely that. -/
+private def pcAssignTarget? (s : StmtExprMd) : Option Nat :=
+  match s.val with
+  | .Assign [t] v =>
+    match t.val, v.val with
+    | .Field _ f, .LiteralInt k => if f.text == "$pc" && k ≥ 0 then some k.toNat else none
+    | _, _ => none
+  | _ => none
+
+/-- All `$pc := k` targets mentioned anywhere in a generated arm body
+    (straight transitions and the two arms of a dispatch conditional).
+    `.attach` on the block's statements gives the termination checker a
+    membership proof for each recursive call, exactly as in
+    `collectVarDeclsExpr` / `containsYield`. -/
+private def pcTargets (s : StmtExprMd) : List Nat :=
+  match _h : s.val with
+  | .Assign _ _ => (pcAssignTarget? s).toList
+  | .Block stmts _ => stmts.attach.flatMap (fun ⟨st, _⟩ => pcTargets st)
+  | .IfThenElse _ t e => pcTargets t ++ (match e with | some eb => pcTargets eb | none => [])
+  | _ => []
+  termination_by sizeOf s
+  decreasing_by
+    all_goals (try have := AstNode.sizeOf_val_lt s)
+    all_goals (try term_by_mem)
+    all_goals (cases s; simp_all; omega)
+
+
+/-- If `body` is a block whose last statement is `$pc := k` (a tail
+    transition, no trailing `return`), return `k`. Suspend arms end in
+    `return` and conditional arms end in an `if`, so both return `none`. -/
+private def tailTransition? (body : StmtExprMd) : Option Nat :=
+  match body.val with
+  | .Block stmts _ => stmts.getLast?.bind pcAssignTarget?
+  | _ => none
+
+/-- Splice `bbody` in place of `abody`'s trailing `$pc :=` statement.
+    `bbody`'s statements are flattened in (rather than nested as a
+    sub-block) so the result's last statement is `bbody`'s last —
+    keeping the merged arm eligible for further coalescing. -/
+private def spliceTail (abody bbody : StmtExprMd) : StmtExprMd :=
+  match abody.val with
+  | .Block astmts lbl =>
+    let bstmts := match bbody.val with
+      | .Block bs _ => bs
+      | _ => [bbody]
+    { val := .Block (astmts.dropLast ++ bstmts) lbl, source := abody.source }
+  | _ => abody  -- not a block ⇒ not a tail-transition arm; unreachable
+
+/-- Fixpoint merge of tail-transition arms into their unique-predecessor
+    targets. Each step removes one arm, so the recursion terminates. -/
+private def coalesceArms (entry : Nat) (arms : Array (Nat × StmtExprMd))
+    : Array (Nat × StmtExprMd) :=
+  let go (m : Std.HashMap Nat StmtExprMd) : Std.HashMap Nat StmtExprMd := Id.run do
+    let mut m := m
+    repeat
+      -- Predecessor counts: how many `$pc := k` sites reference each k.
+      let counts : Std.HashMap Nat Nat :=
+        m.fold (fun acc _ body =>
+          (pcTargets body).foldl (fun acc k => acc.insert k ((acc.getD k 0) + 1)) acc) ∅
+      -- Find an arm A whose tail transitions to a mergeable B.
+      let cand := m.toList.findSome? fun (a, body) =>
+        match tailTransition? body with
+        | some b =>
+          if b != entry && b != endState && counts.getD b 0 == 1 && m.contains b
+          then some (a, b) else none
+        | none => none
+      match cand with
+      | none => break
+      | some (a, b) =>
+        let abody := m.getD a (block [])
+        let bbody := m.getD b (block [])
+        m := (m.erase b).insert a (spliceTail abody bbody)
+    return m
+  let m := arms.foldl (fun m (id, b) => m.insert id b) (∅ : Std.HashMap Nat StmtExprMd)
+  (go m).toList.toArray
 
 /-- Assemble the dispatch loop from emitted state arms. Produces:
 
@@ -593,7 +695,10 @@ private def buildDispatchLoop (arms : Array (Nat × StmtExprMd)) : StmtExprMd :=
 private def linearizeBody (naming : FieldNaming) (resumeParam : Option Identifier)
     (body : StmtExprMd) : StmtExprMd × Nat :=
   let (entry, finalState) := (linearize naming resumeParam body endState).run {}
-  (buildDispatchLoop finalState.arms, entry)
+  -- Coalesce yield-to-yield fragments before assembling the dispatcher,
+  -- so a run of pure transitions collapses into a single arm.
+  let coalesced := coalesceArms entry finalState.arms
+  (buildDispatchLoop coalesced, entry)
 
 /-- Guard a halt postcondition with `$pc == END`. The plain `ensures Q`
     of a coroutine fires only when the coroutine has run to completion,
@@ -650,6 +755,14 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
       c.mapCondition (rewriteStmtExpr naming)
     let relies'     := proc.relies.map rewriteCond
     let guarantees' := proc.guarantees.map rewriteCond
+    -- A resumed coroutine must not already be done: `$pc != END`. This
+    -- rules out resuming a coroutine that has run off its end (which
+    -- would otherwise fall straight to the dispatcher's `else`/return
+    -- with no work). It is a precondition of every `resume` call.
+    let notDone : Condition :=
+      { condition :=
+          { val := .PrimitiveOp .Neq [pcRead, intLit (Int.ofNat endState)], source := none },
+        summary := none }
     -- Halt `ensures` lives in the `Opaque` body's postconditions; guard
     -- each with `$pc == END` so it only fires at completion.
     let haltEnsures := haltPosts.map (guardWithEnd ∘ rewriteCond)
@@ -661,8 +774,8 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
         name := { proc.name with text := "resume" }
         inputs := proc.resumes
         outputs := []
-        -- `relies` is the per-resume precondition.
-        preconditions := relies'
+        -- `$pc != END` (not already done) plus the per-resume `relies`.
+        preconditions := notDone :: relies'
         relies := []
         guarantees := []
         yields := []
