@@ -16,8 +16,8 @@ dispatch loop, contract placement, or constructor generation surface as
 diff noise rather than silent miscompiles.
 -/
 
-meta import Strata.DDM.Elab
-meta import Strata.DDM.BuiltinDialects.Init
+meta import StrataDDM.Elab
+meta import StrataDDM.BuiltinDialects.Init
 meta import Strata.Languages.Laurel.Grammar
 meta import Strata.Languages.Laurel.CoroutineElaboration
 meta import Strata.Languages.Laurel.Resolution
@@ -25,14 +25,15 @@ meta import Strata.Languages.Laurel.Resolution
 meta section
 
 open Strata
-open Strata.Elab (parseStrataProgramFromDialect)
+open StrataDDM (initDialect)
+open StrataDDM.Elab (parseStrataProgramFromDialect)
 
 namespace Strata.Laurel
 
 /-- Parse, resolve, and run Phase A coroutine elaboration. -/
 def parseAndElaborate (input : String) : IO Program := do
-  let inputCtx := Strata.Parser.stringInputContext "test" input
-  let dialects := Strata.Elab.LoadedDialects.ofDialects! #[initDialect, Laurel]
+  let inputCtx := StrataDDM.Parser.stringInputContext "test" input
+  let dialects := StrataDDM.Elab.LoadedDialects.ofDialects! #[initDialect, Laurel]
   let strataProgram ← parseStrataProgramFromDialect dialects Laurel.name inputCtx
   let uri := Strata.Uri.file "test"
   match Laurel.TransM.run uri (Laurel.parseProgram strataProgram) with
@@ -237,6 +238,160 @@ procedure sieve(limit: int)
 -/
 #guard_msgs in
 #eval! do printProgram (← parseAndElaborate branchingLoop)
+
+/-! ## Stress: nested loops, each with its own yield. The inner loop's
+back-edge must not be confused with the outer's; the inner exit must
+flow to the outer body's continuation. -/
+
+def nestedLoops := r"
+coroutine grid(rows: int, cols: int) yields (cell: int)
+{
+  var r: int := 0;
+  while (r < rows)
+    invariant r >= 0
+  {
+    var c: int := 0;
+    while (c < cols)
+      invariant c >= 0
+    {
+      cell := r * cols + c;
+      yield;
+      c := c + 1
+    };
+    r := r + 1
+  }
+};
+"
+
+/--
+info: composite gridState { var $pc: int var rows: int var cols: int var r: int var c: int var cell: intprocedure resume()
+  requires this#$pc != 0
+  opaque
+while(true) if this#$pc == 1 then { assert this#r >= 0; if this#r < this#rows then this#$pc := 9 else this#$pc := 0 } else if this#$pc == 3 then { this#r := this#r + 1; assert this#r >= 0; this#$pc := 1 } else if this#$pc == 4 then { assert this#c >= 0; if this#c < this#cols then this#$pc := 8 else this#$pc := 3 } else if this#$pc == 6 then { this#c := this#c + 1; assert this#c >= 0; this#$pc := 4 } else if this#$pc == 8 then { this#cell := this#r * this#cols + this#c; this#$pc := 6; return {  } } else if this#$pc == 9 then { this#c := 0; this#$pc := 4 } else if this#$pc == 10 then { this#r := 0; this#$pc := 1 } else return {  }; }
+procedure grid(rows: int, cols: int)
+  returns ($co: gridState)
+  opaque
+  ensures $co#$pc == 10
+  ensures $co#rows == rows
+  ensures $co#cols == cols
+{ $co := new gridState; $co#$pc := 10; $co#rows := rows; $co#cols := cols };
+-/
+#guard_msgs in
+#eval! do printProgram (← parseAndElaborate nestedLoops)
+
+/-! ## Stress: nested conditionals with a yield only in the innermost
+then-branch (asymmetric — the else paths fall through with no yield).
+Exercises branch-merge where some branches are pure transitions. -/
+
+def nestedIf := r"
+coroutine classify(x: int) yields (tag: int)
+{
+  if x > 0 then {
+    if x > 10 then {
+      tag := 2;
+      yield
+    } else {
+      tag := 1
+    }
+  } else {
+    tag := 0
+  };
+  tag := 0 - 1;
+  yield
+};
+"
+
+/--
+info: composite classifyState { var $pc: int var x: int var tag: intprocedure resume()
+  requires this#$pc != 0
+  opaque
+while(true) if this#$pc == 2 then { this#tag := 0 - 1; this#$pc := 0; return {  } } else if this#$pc == 4 then { this#tag := 2; this#$pc := 2; return {  } } else if this#$pc == 5 then { { this#tag := 1 }; this#$pc := 2 } else if this#$pc == 6 then if this#x > 10 then this#$pc := 4 else this#$pc := 5 else if this#$pc == 7 then { { this#tag := 0 }; this#$pc := 2 } else if this#$pc == 8 then if this#x > 0 then this#$pc := 6 else this#$pc := 7 else return {  }; }
+procedure classify(x: int)
+  returns ($co: classifyState)
+  opaque
+  ensures $co#$pc == 8
+  ensures $co#x == x
+{ $co := new classifyState; $co#$pc := 8; $co#x := x };
+-/
+#guard_msgs in
+#eval! do printProgram (← parseAndElaborate nestedIf)
+
+/-! ## Stress: a yield-free inner loop nested inside a yielding outer
+loop. The inner loop has no yield, so it must stay a single coalesced
+state (an ordinary `while`), not fragment into dispatch arms. -/
+
+def yieldFreeInner := r"
+coroutine summer(n: int) yields (running: int)
+{
+  var total: int := 0;
+  var i: int := 0;
+  while (i < n)
+    invariant i >= 0
+  {
+    var j: int := 0;
+    while (j < i)
+      invariant j >= 0
+    {
+      total := total + j;
+      j := j + 1
+    };
+    running := total;
+    yield;
+    i := i + 1
+  }
+};
+"
+
+/--
+info: composite summerState { var $pc: int var n: int var total: int var i: int var j: int var running: intprocedure resume()
+  requires this#$pc != 0
+  opaque
+while(true) if this#$pc == 1 then { assert this#i >= 0; if this#i < this#n then this#$pc := 7 else this#$pc := 0 } else if this#$pc == 3 then { this#i := this#i + 1; assert this#i >= 0; this#$pc := 1 } else if this#$pc == 7 then { this#j := 0; while(this#j < this#i)
+  invariant this#j >= 0 { this#total := this#total + this#j; this#j := this#j + 1 }; this#running := this#total; this#$pc := 3; return {  } } else if this#$pc == 9 then { this#total := 0; this#i := 0; this#$pc := 1 } else return {  }; }
+procedure summer(n: int)
+  returns ($co: summerState)
+  opaque
+  ensures $co#$pc == 9
+  ensures $co#n == n
+{ $co := new summerState; $co#$pc := 9; $co#n := n };
+-/
+#guard_msgs in
+#eval! do printProgram (← parseAndElaborate yieldFreeInner)
+
+/-! ## Stress: two yields in sequence inside one if-branch, plus a
+trailing yield after the if. Exercises a chain of suspends within a
+single branch and re-convergence. -/
+
+def multiYieldBranch := r"
+coroutine pulse(flag: bool) yields (beat: int)
+{
+  if flag then {
+    beat := 1;
+    yield;
+    beat := 2;
+    yield
+  } else {
+    beat := 0
+  };
+  beat := 9;
+  yield
+};
+"
+
+/--
+info: composite pulseState { var $pc: int var flag: bool var beat: intprocedure resume()
+  requires this#$pc != 0
+  opaque
+while(true) if this#$pc == 2 then { this#beat := 9; this#$pc := 0; return {  } } else if this#$pc == 4 then { this#beat := 2; this#$pc := 2; return {  } } else if this#$pc == 6 then { this#beat := 1; this#$pc := 4; return {  } } else if this#$pc == 7 then { { this#beat := 0 }; this#$pc := 2 } else if this#$pc == 8 then if this#flag then this#$pc := 6 else this#$pc := 7 else return {  }; }
+procedure pulse(flag: bool)
+  returns ($co: pulseState)
+  opaque
+  ensures $co#$pc == 8
+  ensures $co#flag == flag
+{ $co := new pulseState; $co#$pc := 8; $co#flag := flag };
+-/
+#guard_msgs in
+#eval! do printProgram (← parseAndElaborate multiYieldBranch)
 
 end Strata.Laurel
 end

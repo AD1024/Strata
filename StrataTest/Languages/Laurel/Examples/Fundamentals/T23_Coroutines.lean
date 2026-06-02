@@ -28,8 +28,8 @@ type plus a `Coro.resume` procedure, and rewrites `coro(1)` into
 
 meta import all StrataTest.Util.TestDiagnostics
 meta import all StrataTest.Languages.Laurel.TestExamples
-meta import Strata.DDM.Elab
-meta import Strata.DDM.BuiltinDialects.Init
+meta import StrataDDM.Elab
+meta import StrataDDM.BuiltinDialects.Init
 meta import Strata.Languages.Laurel.Grammar.LaurelGrammar
 meta import Strata.Languages.Laurel.Grammar.ConcreteToAbstractTreeTranslator
 meta import Strata.Languages.Laurel.Resolution
@@ -38,7 +38,8 @@ meta section
 
 open StrataTest.Util
 open Strata
-open Strata.Elab (parseStrataProgramFromDialect)
+open StrataDDM (initDialect)
+open StrataDDM.Elab (parseStrataProgramFromDialect)
 
 namespace Strata.Laurel
 
@@ -47,7 +48,7 @@ namespace Strata.Laurel
     constructs *parse and resolve* without firing the rejectCoroutines
     pipeline pass. -/
 private def processResolution (input : Lean.Parser.InputContext) : IO (Array Diagnostic) := do
-  let dialects := Strata.Elab.LoadedDialects.ofDialects! #[initDialect, Laurel]
+  let dialects := StrataDDM.Elab.LoadedDialects.ofDialects! #[initDialect, Laurel]
   let strataProgram ← parseStrataProgramFromDialect dialects Laurel.name input
   let uri := Strata.Uri.file input.fileName
   match Laurel.TransM.run uri (Laurel.parseProgram strataProgram) with
