@@ -481,7 +481,7 @@ def translateEnsuresClauses (arg : Arg) : TransM (List Condition) := do
     (a condition plus an optional error summary); only the wrapping op
     name differs. -/
 private def translateRelyGuaranteeClauses (arg : Arg)
-    (opName : Strata.QualifiedIdent) : TransM (List Condition) := do
+    (opName : QualifiedIdent) : TransM (List Condition) := do
   match arg with
   | .seq _ _ args => do
     let mut allClauses : List Condition := []
@@ -616,7 +616,7 @@ def parseProcedure (arg : Arg) : TransM Procedure := do
     `(parameters: CommaSepBy Parameter)` grammar shape with `returns (...)`.
     Empty parens (`yields ()`) are rejected — the user should omit the
     clause when there is no value to yield/resume. -/
-def parseChannelClause (arg : Arg) (opName : Strata.QualifiedIdent)
+def parseChannelClause (arg : Arg) (opName : QualifiedIdent)
     : TransM (List Parameter) := do
   match arg with
   | .option _ (some (.op clauseOp)) => match clauseOp.name, clauseOp.args with
