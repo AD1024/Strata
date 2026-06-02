@@ -17,6 +17,7 @@ import Strata.Languages.Laurel.CoreDefinitionsForLaurel
 import Strata.Languages.Laurel.EliminateHoles
 import Strata.Languages.Laurel.Grammar.AbstractToConcreteTreeTranslator
 import Strata.Languages.Laurel.HeapParameterization
+import Strata.Languages.Laurel.CoroutineElaboration
 import Strata.Languages.Laurel.InferHoleTypes
 import Strata.Languages.Laurel.LiftImperativeExpressions
 import Strata.Languages.Laurel.ModifiesClauses
@@ -92,6 +93,14 @@ structure LaurelPass where
   name : String
   /-- Whether `resolve` should be run after the pass. -/
   needsResolves : Bool := false
+  /-- Skip this pass when the initial resolution produced a blocking
+      (non-warning) diagnostic. Passes that transform the AST based on
+      resolved `uniqueId`s (e.g. `CoroutineElaboration`) should set this:
+      on a resolution failure their inputs are malformed, the run would
+      produce garbage, and a blocking diagnostic already guarantees the
+      pipeline returns no Core program -- so the work is both unsafe and
+      wasted. -/
+  skipOnResolutionError : Bool := false
   /-- The pass action. -/
   run : Program → SemanticModel → Program × List DiagnosticModel × Statistics
 
@@ -130,6 +139,13 @@ private def laurelPipeline : Array LaurelPass := #[
     run := fun p _m =>
       let (p', diags) := eliminateValueReturnsTransform p
       (p', diags.toList, {}) },
+  { name := "CoroutineElaboration"
+    -- Generates new state composites (with a `resume` method) and drops
+    -- the coroutine procedures. Re-resolve so the SemanticModel reflects
+    -- the new type definitions before any downstream pass consumes it.
+    needsResolves := true
+    skipOnResolutionError := true
+    run := fun p m => (elaborateCoroutines m p, [], {}) },
   { name := "HeapParameterization"
     needsResolves := true
     run := fun p m =>
@@ -191,6 +207,10 @@ private def runLaurelPasses (options : LaurelTranslateOptions)
   let result := resolve program
   let resolutionErrors : List DiagnosticModel :=
     if options.emitResolutionErrors then result.errors.toList else []
+  -- Whether resolution produced a blocking (non-warning) diagnostic.
+  -- Checked against the raw result, independent of `emitResolutionErrors`,
+  -- so passes that depend on a well-resolved AST can be skipped reliably.
+  let hadResolutionError : Bool := result.errors.any (·.type != .Warning)
   let (program, model) := (result.program, result.model)
   emit "Resolve" "laurel.st" program
 
@@ -205,6 +225,12 @@ private def runLaurelPasses (options : LaurelTranslateOptions)
   let mut allStats : Statistics := {}
 
   for pass in laurelPipeline do
+    -- Skip resolution-dependent passes when the initial resolution
+    -- failed: their inputs are malformed and a blocking diagnostic
+    -- already guarantees no Core program is produced.
+    if pass.skipOnResolutionError && hadResolutionError then
+      emit pass.name "laurel.st" program
+      continue
     let (program', diags, stats) ← pctx.withPhase pass.name do pure (pass.run program model)
     program := program'
     allDiags := allDiags ++ diags
