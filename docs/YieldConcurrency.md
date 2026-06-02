@@ -2,11 +2,16 @@
 
 ## Status
 
-**Stages 1 and 1.5 are implemented**: surface (parsing, AST, resolution,
-type-namespace registration, pretty-print round-trip) is in place. Stage 2
-(Phase A elaboration into a composite + `resume` procedure) and Stage 3
-(Core lowering and VCG) are not yet implemented. See
-[Implementation status](#implementation-status) for what's landed.
+**Stages 1, 1.5, and the core of Stage 2 are implemented.** Surface
+(parsing, AST, resolution, type-namespace registration, pretty-print
+round-trip) is in place, and Phase A elaboration now lowers each
+coroutine into a state composite + `resume` instance procedure + spawn
+constructor via a MoveNext-style state machine. What remains in Stage 2
+is the **caller-side rewrite** (spawn type-annotation and `resume(co,v)`
+call rewriting); until that lands, `rejectCoroutines` still guards the
+pipeline so no coroutine program reaches Core. Stage 3 (Core lowering of
+the rely/guarantee VCs and pairwise compatibility) is not yet started.
+See [Implementation status](#implementation-status) for details.
 
 Strata models concurrency via coroutines with explicit `yield` and a
 per-yield rely/guarantee discipline (`relies` / `guarantees`)
@@ -47,8 +52,9 @@ The model is intentionally minimal:
 
 `coroutine` is a top-level keyword that surfaces to its own `Coroutine`
 production in the [grammar](../Strata/Languages/Laurel/Grammar/LaurelGrammar.st).
-Stage 2 (not yet implemented) elaborates it into a composite plus a
-`resume` procedure (see [Lowering pipeline](#lowering-pipeline)).
+Stage 2's Phase A elaborates it into a composite plus a `resume`
+procedure and a spawn constructor (see
+[Lowering pipeline](#lowering-pipeline)).
 
 ```
 coroutine name(p1: T1, ..., pn: Tn)
@@ -177,25 +183,29 @@ flowchart TD
 
 ### Phase A: coroutine elaboration
 
-For each `coroutine c(p₁, …, pₖ) requires R ensures G { body }` Stage 2
-(not yet implemented) generates:
+For each `coroutine c(p₁, …, pₖ) requires R ensures G { body }`, Phase A
+(implemented — see [Stage 2](#stage-2--phase-a-elaboration)) generates:
 
-1. A composite `C` with one immutable field per parameter `pᵢ`, plus
-   - `var pc: int` — index of the next yield site (0 = entry, `END` = returned),
-   - `var H_snap: Heap` — segment-start snapshot,
-   - one `var` per local variable that was live across some yield (the
-     suspended stack frame). Locals that don't cross a yield stay local
-     to `resume`.
-2. A `procedure C.resume(self : C, heap : Heap)` whose body is a `switch`
-   on `self#pc` that dispatches into the segment originating at that
-   yield site. Each segment ends by writing `self#pc := next` and exiting
-   `resume`. Bare `return` writes `self#pc := END`.
-3. The clauses on the source coroutine move onto generated procedures:
-   plain `requires` becomes the precondition of the constructor;
-   plain `ensures` becomes the postcondition fired only when the
-   `pc := END` branch is taken; `relies` / `guarantees`
-   move verbatim onto `C.resume`. Phase B turns the latter pair into
-   Core `assert`/`havoc`/`assume` at `resume`'s boundaries:
+1. A composite `<c>State` with `var $pc: int` (state index; `entry` on
+   construction, `END = 0` when done) plus one mutable field per input,
+   per body local (the whole suspended frame is hoisted — no liveness
+   analysis), and per `yields` binding. `resumes` is *not* a field — it
+   is `resume`'s parameter. (`H_snap` is *not* a field; the segment-start
+   snapshot is introduced locally by Stage 3, against the heap value
+   `HeapParameterization` threads through.)
+2. A `procedure <c>State.resume(...)` whose body is a `while (true)`
+   dispatch on `self#$pc`: each arm runs one segment, then either
+   suspends (`$pc := next; return`) or transitions (`$pc := k`, falls
+   through, re-dispatches). Bare `return` sets `$pc := END`. Adjacent
+   non-suspending arms are coalesced.
+3. A spawn constructor (static procedure named `c`) allocating the
+   composite, setting `$pc := entry`, and copying inputs into fields.
+4. The clauses move onto the generated procedures: plain `requires` →
+   constructor precondition (verbatim); plain `ensures` → `resume`
+   postcondition guarded by `$pc == END`; `relies` → `resume`
+   precondition (plus `$pc != END`); `guarantees` → `resume`
+   postcondition (unguarded). Stage 3 then turns the rely/guarantee pair
+   into Core `assert`/`havoc`/`assume` at `resume`'s boundaries:
 
 ```
 // at entry of C.resume:
@@ -457,13 +467,21 @@ replaces these nodes with composite-field reads. `Unknown` rather than
   unreachable in practice because `rejectCoroutines` short-circuits
   earlier in the pipeline.
 
-#### Pipeline stub ([LaurelCompilationPipeline.lean](../Strata/Languages/Laurel/LaurelCompilationPipeline.lean))
+#### Pipeline ([LaurelCompilationPipeline.lean](../Strata/Languages/Laurel/LaurelCompilationPipeline.lean))
 
-`rejectCoroutines` is the first pass in `laurelPipeline`. It scans for
-`kind = .Coroutine` and emits one targeted diagnostic per coroutine.
-The program flows through unchanged so later passes don't add noise.
-This pass deletes itself in Stage 2 once Phase A removes coroutines
-before this point.
+`rejectCoroutines` is the first pass: it emits one targeted diagnostic
+per coroutine and passes the program through unchanged. `CoroutineElaboration`
+runs later (before `HeapParameterization`) and *does* now rewrite
+coroutines into composites — but because a coroutine program already
+carries a blocking diagnostic from `rejectCoroutines`, the pipeline
+returns no Core program, so the elaborated output is never lowered. Once
+the caller-side rewrite lands, `rejectCoroutines` is deleted and
+elaboration becomes the live path.
+
+The `LaurelPass` structure gained two flags for this: `needsResolves`
+(re-resolve after the pass, so the model reflects newly-generated type
+defs) and `skipOnResolutionError` (skip a resolution-dependent pass when
+the initial resolution failed). `CoroutineElaboration` sets both.
 
 #### Tests ([T23_Coroutines.lean](../StrataTest/Languages/Laurel/Examples/Fundamentals/T23_Coroutines.lean))
 
@@ -484,43 +502,85 @@ Twelve parse-and-resolve tests, plus an end-to-end lock-server example:
 | `LockServer` | end-to-end: `Message` datatype, two coroutines (`lockServer` + `participant`), `guarantees` rely/guarantee clauses, recursive `ParticipantList`, non-deterministic scheduler via `<??>` |
 | `CoroutineRejected` | full pipeline; pins the rejection diagnostic |
 
-### Stage 2 plan — Phase A elaboration
+### Stage 2 — Phase A elaboration
 
-A new file `Strata/Languages/Laurel/CoroutineElaboration.lean`,
-registered as a `LaurelPass` *before* `HeapParameterization`:
+Implemented in
+[`CoroutineElaboration.lean`](../Strata/Languages/Laurel/CoroutineElaboration.lean),
+registered as a `LaurelPass` *before* `HeapParameterization`
+(`needsResolves := true`, since it adds type definitions, and
+`skipOnResolutionError := true`, since malformed input cannot be
+elaborated safely).
 
-- **Liveness analysis** of locals across `yield` boundaries. Live
-  locals are promoted to fields of the generated composite; the rest
-  stay locals of `resume`.
-- **Yield-CFG construction**: number yield sites, partition the body
-  into segments, emit a `switch (self#pc)` body for `resume`. Each
-  segment ends by writing `self#pc := next` and exiting; bare `return`
-  writes `self#pc := END`.
-- **Composite generation**: emit
-  `composite C { params; var pc; var H_snap; promotedLocals; outgoing; incoming }`,
-  a constructor whose `requires` is the source coroutine's plain
-  `requires`, and `procedure C.resume(self : C)` whose `requires`
-  is the source coroutine's `relies` and whose `ensures` is
-  the source coroutine's `guarantees`, all copied verbatim with
-  `x` and `y` rewritten to the generated outgoing/incoming fields.
-  The source `ensures` (halt postcondition) is asserted along the
-  `pc := END` branch only.
-- **Constructor elaboration**: `producer(args)` becomes
-  `new Producer(args)` plus an init block setting `pc := 0`,
-  `H_snap := heap`, and the input parameters.
-- **Call-site rewrite**: `resume(co)` becomes `Producer.resume(co)`;
-  `resume(co, v)` additionally writes `co#incoming := v` first.
-- **Per-site value lowering**: `yield` in expression position becomes
-  a read of `self#incoming`; `x := e; yield` writes `self#outgoing`
-  before the suspension.
+#### Landed
+
+- **Local collection + promotion.** `collectVarDecl` harvests every body
+  local — both bare `var x: T` and the initialized `var x: T := e` form
+  (which parses to `Assign`-of-`Declare`) — keyed by resolved `uniqueId`.
+  Every local is promoted to a composite field; no liveness analysis (we
+  hoist the whole frame, which is simpler and sound — unused fields are
+  harmless). `rewriteStmtExpr` rewrites every local read/write to
+  `self#field`, preserving reference-site source locations.
+- **Collision-only field naming** (`fieldNaming`). Laurel allows
+  scope-based shadowing (`var x` in disjoint branches resolve to distinct
+  `uniqueId`s), which would collide on the composite's field-name
+  resolution key. Names are mangled (`text$uid`) *only* on genuine
+  collision, so the common case keeps the user's names for readable
+  diagnostics. `resumes` bindings are **not** promoted — the resumed
+  value is a per-call argument, lowered to a parameter of `resume`.
+- **State-machine linearization** (`linearize`, structural recursion,
+  with a termination proof). Compiles the body into `$pc`-dispatched
+  state arms: yield-free subtrees stay whole; `yield` suspends
+  (`$pc := next; return`); `x := yield` splits into suspend + a resume
+  arm that binds the resume parameter into `x` (Python `gen.send`); `if`
+  splits with both branches re-converging at the continuation; `while`
+  becomes head + bodyEnd with the back-edge through bodyEnd. While
+  invariants are asserted at head, body-end, and (implicitly) exit.
+- **State coalescing** (`coalesceArms`). A fixpoint peephole pass merges
+  yield-to-yield fragments: an arm that tail-transitions (`$pc := k`, no
+  `return`) to a single-predecessor, non-entry, non-end arm absorbs that
+  arm's body. Suspends are never crossed. Substantially shrinks the
+  dispatch table (the bidirectional `adder`: 7 states → 2).
+- **`resume` procedure generation** (`populateCoroutineComposite`).
+  Instance procedure on the state composite, body = the coalesced
+  dispatch loop. Contracts:
+  - `relies` → `resume` precondition (per-resume rely),
+  - plus `$pc != END` (cannot resume a completed coroutine),
+  - `guarantees` → `resume` postcondition (unguarded; holds at every
+    yield),
+  - plain halt `ensures` → `resume` postcondition guarded by
+    `$pc == END` (only fires at completion).
+  All clause expressions are rewritten through `fieldNaming` to reference
+  `self#…`.
+- **Spawn constructor generation** (`coroutineConstructor`). A static
+  procedure named after the coroutine: allocates the composite, sets
+  `$pc := entry` (the body's first state, *distinct* from the `END = 0`
+  "done" state), copies inputs into fields. Carries the source coroutine's
+  plain `requires` **verbatim** (its subjects are the inputs, which are
+  the constructor's own parameters — no rewrite). `ensures $co#$pc == entry`
+  and the input-copy equalities make the first resume's entry provable.
+- **Tests**
+  ([`CoroutineElaborationTest.lean`](../StrataTest/Languages/Laurel/CoroutineElaborationTest.lean)):
+  six `#guard_msgs` golden cases — empty, yield-in-while (`counter`),
+  input + `requires` (`producer`), rely/guarantee channel (`echo`),
+  bidirectional `x := yield` (`adder`), and combined if-inside-while
+  (`sieve`).
+
+#### Remaining in Stage 2
+
+- **Caller-side rewrite.** A spawn `var co: coro := coro(args)` resolves
+  its *call* to the generated constructor automatically (same name), but
+  the *type annotation* `co: coro` still names the removed coroutine type
+  and must be rewritten to `co: <coro>State`. `resume(co)` /
+  `resume(co, v)` must become the instance call `co.resume()` /
+  `co.resume(v)`. This is the one piece keeping coroutine programs from
+  reaching Core.
 - **`exit <label>` safety check**: reject `exit` whose target labelled
-  block contains a `yield`, with *"`exit done` cannot leave a labelled
-  block that contains `yield`"*. Same-segment exits are safe.
-- **Tests** under
-  [`StrataTest/Languages/Laurel/`](../StrataTest/Languages/Laurel):
-  golden-file "coroutine in → composite + resume out" for several
-  shapes (no yields, one yield, yield-in-loop, yield-in-conditional).
-- **Delete `rejectCoroutines`** once Phase A is in.
+  block contains a `yield`. Not yet implemented; same-segment exits are
+  safe, cross-segment ones are not yet diagnosed.
+- **Expression-position yield in non-trivial positions** (e.g.
+  `x := f(yield)`): currently kept as a single state rather than lowered;
+  should be rejected at resolution.
+- **Delete `rejectCoroutines`** once the caller rewrite lands.
 
 ### Stage 3 plan — Core lowering and VCG
 
@@ -531,9 +591,12 @@ registered as a `LaurelPass` *before* `HeapParameterization`:
   `assume R(self#H_snap, heap, y)` at `resume` entry and
   `assert G(H_snap_cur, heap, x); self#H_snap := heap` at `resume`
   exit. Plain `requires` flows to the constructor; plain `ensures`
-  flows to the `pc := END` branch only. `old(e)` inside `yield_*`
-  desugars to `e[heap := self#H_snap]`; inside plain `requires`/
-  `ensures` it keeps its standard meaning.
+  flows to the `pc := END` branch only. (Phase A already places `relies`
+  / `guarantees` / END-guarded `ensures` / `requires` on the right
+  generated procedures; Stage 3 adds the heap-snapshot threading and the
+  `old(e)` rewrite below.) `old(e)` inside `relies` / `guarantees`
+  desugars to `e[heap := self#H_snap]` (the segment-start snapshot);
+  inside plain `requires` / `ensures` it keeps its standard meaning.
 - **Pairwise compatibility VCs**: one Core procedure per ordered pair
   of coroutine *types*, with the quantified
   `forall p p'. p ≠ p' ==> G_C(...) ==> R_D(...)` formula.
@@ -544,7 +607,7 @@ registered as a `LaurelPass` *before* `HeapParameterization`:
 
 ### Remaining TODOs
 
-Smaller items deliberately deferred from Stage 1.5; none block Stage 2.
+Smaller items; none block the caller-side rewrite that completes Stage 2.
 
 - **Restrict bare `return` to coroutines.** Resolution permits
   `Return none` everywhere it parses; it should be rejected outside
@@ -552,16 +615,19 @@ Smaller items deliberately deferred from Stage 1.5; none block Stage 2.
   single-output). Deferred so we can audit
   [`EliminateValueReturns`](../Strata/Languages/Laurel/EliminateValueReturns.lean)
   before tightening.
-- **Scope-restriction errors for `x` and `y`.** Stage 1.5 puts the
+- **Scope-restriction errors for `x` and `y`.** Resolution puts the
   channel bindings in scope but does not strictly enforce
   `x ∈ guarantees only` / `y ∈ relies only`. Misuse
   currently surfaces as an unbound-name diagnostic.
 - **Argument and resume-target type checking.** Spawn calls
-  (`producer(args)`) and `resume(co, v)` are not arity- or
-  type-checked at Stage 1.5. These fall out of Stage 2's elaboration
-  into the composite-constructor and method-call type checks.
-- **Plumb `T_resume` / `T_yield` into `LaurelTypes`.** Same Stage 2
-  footing.
+  (`producer(args)`) and `resume(co, v)` are not arity- or type-checked
+  on the coroutine surface; the checks land naturally once the caller
+  rewrite turns them into ordinary constructor / instance-method calls
+  that the existing type checker covers.
+- **Plumb `T_resume` / `T_yield` into `LaurelTypes`.** After the caller
+  rewrite, `Yield` / `Resume` no longer survive to type inference (Phase
+  A replaces them with field reads / method calls), so this may dissolve
+  entirely — confirm once the rewrite lands.
 - **Asymmetric `Return none` round-trip.** Source `return` parses to
   `Return none`, but the A→C printer emits `return { }`; re-parsing
   yields `Return (some <empty block>)`. Fine for current usage; revisit
