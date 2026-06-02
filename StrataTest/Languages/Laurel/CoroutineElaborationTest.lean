@@ -58,6 +58,7 @@ coroutine empty()
 
 /--
 info: composite emptyState { var $pc: intprocedure resume()
+  requires this#$pc != 0
   opaque
 while(true) if this#$pc == 1 then { {  }; this#$pc := 0 } else return {  }; }
 procedure empty()
@@ -89,8 +90,9 @@ coroutine counter() yields (x: int)
 
 /--
 info: composite counterState { var $pc: int var i: int var x: intprocedure resume()
+  requires this#$pc != 0
   opaque
-while(true) if this#$pc == 3 then { this#i := this#i + 1; this#$pc := 2 } else if this#$pc == 4 then { this#$pc := 3; return {  } } else if this#$pc == 5 then { this#x := this#i; this#$pc := 4 } else if this#$pc == 2 then { assert this#i >= 0; this#$pc := 1 } else if this#$pc == 1 then { assert this#i >= 0; if this#i < 3 then this#$pc := 5 else this#$pc := 0 } else if this#$pc == 6 then { this#i := 0; this#$pc := 1 } else return {  }; }
+while(true) if this#$pc == 1 then { assert this#i >= 0; if this#i < 3 then this#$pc := 5 else this#$pc := 0 } else if this#$pc == 3 then { this#i := this#i + 1; assert this#i >= 0; this#$pc := 1 } else if this#$pc == 5 then { this#x := this#i; this#$pc := 3; return {  } } else if this#$pc == 6 then { this#i := 0; this#$pc := 1 } else return {  }; }
 procedure counter()
   returns ($co: counterState)
   opaque
@@ -114,8 +116,9 @@ coroutine producer(seed: int) yields (x: int)
 
 /--
 info: composite producerState { var $pc: int var seed: int var x: intprocedure resume()
+  requires this#$pc != 0
   opaque
-while(true) if this#$pc == 1 then { this#$pc := 0; return {  } } else if this#$pc == 2 then { this#x := this#seed + 1; this#$pc := 1 } else if this#$pc == 3 then { this#$pc := 2; return {  } } else if this#$pc == 4 then { this#x := this#seed; this#$pc := 3 } else return {  }; }
+while(true) if this#$pc == 2 then { this#x := this#seed + 1; this#$pc := 0; return {  } } else if this#$pc == 4 then { this#x := this#seed; this#$pc := 2; return {  } } else return {  }; }
 procedure producer(seed: int)
   returns ($co: producerState)
   requires seed >= 0
@@ -141,10 +144,11 @@ coroutine echo() yields (x: int) resumes (y: int)
 
 /--
 info: composite echoState { var $pc: int var x: intprocedure resume(y: int)
+  requires this#$pc != 0
   requires y >= 0
   opaque
   ensures this#x >= 0
-while(true) if this#$pc == 1 then { this#$pc := 0; return {  } } else if this#$pc == 2 then { this#x := 0; this#$pc := 1 } else return {  }; }
+while(true) if this#$pc == 2 then { this#x := 0; this#$pc := 0; return {  } } else return {  }; }
 procedure echo()
   returns ($co: echoState)
   opaque
@@ -181,8 +185,9 @@ coroutine adder() yields (out: int) resumes (inp: int)
 
 /--
 info: composite adderState { var $pc: int var total: int var z: int var out: intprocedure resume(inp: int)
+  requires this#$pc != 0
   opaque
-while(true) if this#$pc == 1 then { this#$pc := 0; return {  } } else if this#$pc == 2 then { this#out := this#total; this#$pc := 1 } else if this#$pc == 3 then { this#total := this#total + this#z; this#$pc := 2 } else if this#$pc == 5 then { this#$pc := 4; return {  } } else if this#$pc == 4 then { this#z := inp; this#$pc := 3 } else if this#$pc == 6 then { this#out := this#total; this#$pc := 5 } else if this#$pc == 7 then { this#total := 0; this#$pc := 6 } else return {  }; }
+while(true) if this#$pc == 4 then { this#z := inp; this#total := this#total + this#z; this#out := this#total; this#$pc := 0; return {  } } else if this#$pc == 7 then { this#total := 0; this#out := this#total; this#$pc := 4; return {  } } else return {  }; }
 procedure adder()
   returns ($co: adderState)
   opaque
@@ -191,6 +196,47 @@ procedure adder()
 -/
 #guard_msgs in
 #eval! do printProgram (← parseAndElaborate duplexCoroutine)
+
+/-! ## Combined control flow: a `while` loop whose body contains an
+`if`/`else`, with a `yield` in each branch. Exercises the interaction of
+the loop-split (head / bodyEnd / back-edge) with the branch-split
+(dispatch state → per-branch entry → merge), and confirms both branches'
+yields produce distinct suspend states that re-converge at the loop's
+bodyEnd. -/
+
+def branchingLoop := r"
+coroutine sieve(limit: int) yields (out: int)
+{
+  var i: int := 0;
+  while (i < limit)
+    invariant i >= 0
+  {
+    if i % 2 == 0 then {
+      out := i;
+      yield
+    } else {
+      out := 0 - i;
+      yield
+    };
+    i := i + 1
+  }
+};
+"
+
+/--
+info: composite sieveState { var $pc: int var limit: int var i: int var out: intprocedure resume()
+  requires this#$pc != 0
+  opaque
+while(true) if this#$pc == 1 then { assert this#i >= 0; if this#i < this#limit then this#$pc := 8 else this#$pc := 0 } else if this#$pc == 3 then { this#i := this#i + 1; assert this#i >= 0; this#$pc := 1 } else if this#$pc == 5 then { this#out := this#i; this#$pc := 3; return {  } } else if this#$pc == 7 then { this#out := 0 - this#i; this#$pc := 3; return {  } } else if this#$pc == 8 then if this#i % 2 == 0 then this#$pc := 5 else this#$pc := 7 else if this#$pc == 9 then { this#i := 0; this#$pc := 1 } else return {  }; }
+procedure sieve(limit: int)
+  returns ($co: sieveState)
+  opaque
+  ensures $co#$pc == 9
+  ensures $co#limit == limit
+{ $co := new sieveState; $co#$pc := 9; $co#limit := limit };
+-/
+#guard_msgs in
+#eval! do printProgram (← parseAndElaborate branchingLoop)
 
 end Strata.Laurel
 end
