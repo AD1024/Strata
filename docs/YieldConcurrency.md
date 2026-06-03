@@ -560,10 +560,13 @@ elaborated safely).
   and the input-copy equalities make the first resume's entry provable.
 - **Tests**
   ([`CoroutineElaborationTest.lean`](../StrataTest/Languages/Laurel/CoroutineElaborationTest.lean)):
-  six `#guard_msgs` golden cases — empty, yield-in-while (`counter`),
-  input + `requires` (`producer`), rely/guarantee channel (`echo`),
-  bidirectional `x := yield` (`adder`), and combined if-inside-while
-  (`sieve`).
+  ten `#guard_msgs` golden cases. Core surface: empty, yield-in-while
+  (`counter`), input + `requires` (`producer`), rely/guarantee channel
+  (`echo`), bidirectional `x := yield` (`adder`), combined if-inside-while
+  (`sieve`). Nested-structure stress cases: nested loops each with a yield
+  (`grid`), nested conditionals with an asymmetric yield (`classify`), a
+  yield-free inner loop that stays a single coalesced state (`summer`),
+  and sequential yields within one branch (`pulse`).
 
 #### Remaining in Stage 2
 
