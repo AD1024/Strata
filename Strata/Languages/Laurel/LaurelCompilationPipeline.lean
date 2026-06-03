@@ -10,6 +10,7 @@ import Strata.Languages.Laurel.DesugarShortCircuit
 import Strata.Languages.Laurel.EliminateReturnsInExpression
 import Strata.Languages.Laurel.EliminateValueReturns
 import Strata.Languages.Laurel.ConstrainedTypeElim
+import Strata.Languages.Laurel.LiftInstanceProcedures
 import Strata.Languages.Laurel.TypeAliasElim
 public import Strata.Languages.Core
 import Strata.Languages.Core.DDMTransform.ASTtoCST
@@ -115,12 +116,18 @@ private def laurelPipeline : Array LaurelPass := #[
       let (p', diags) := eliminateValueReturnsTransform p
       (p', diags.toList, {}) },
   { name := "CoroutineElaboration"
-    -- Generates new state composites (with a `resume` method) and drops
-    -- the coroutine procedures. Re-resolve so the SemanticModel reflects
-    -- the new type definitions before any downstream pass consumes it.
+    -- Generates new state composites (with a `resume` instance procedure)
+    -- and drops the coroutine procedures. Must run before
+    -- `LiftInstanceProcedures` so the generated `resume` is folded into a
+    -- top-level static call. Re-resolve so the model reflects the new
+    -- type definitions before any downstream pass consumes it.
     needsResolves := true
     skipOnResolutionError := true
     run := fun p m => (elaborateCoroutines m p, [], {}) },
+  { name := "LiftInstanceProcedures"
+    needsResolves := true
+    run := fun p m =>
+      (liftInstanceProcedures m p, [], {}) },
   { name := "HeapParameterization"
     needsResolves := true
     run := fun p m =>
