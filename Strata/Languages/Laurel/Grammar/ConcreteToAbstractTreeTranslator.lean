@@ -288,29 +288,32 @@ partial def translateStmtExpr (arg : Arg) : TransM StmtExprMd := do
       return mkStmtExprMd (.AsType target (mkHighTypeMd (.UserDefined typeName) src)) src
     | q`Laurel.call, #[arg0, argsSeq] =>
       let callee ← translateStmtExpr arg0
-      let calleeName := match callee.val with
-        | .Var (.Local name) => name
-        | _ => ""
       let argsList ← match argsSeq with
         | .seq _ .comma args => args.toList.mapM translateStmtExpr
         | _ => pure []
-      -- Special-case `resume(target)` / `resume(target, value)` and
-      -- `old(e)` into distinct AST nodes. The grammar reuses the generic
-      -- call production for both, so the rewrite happens here rather
-      -- than in the parser. The inverse direction (A→C) emits these as
-      -- `call` ops too, so the round-trip is symmetric.
-      if calleeName.text == "resume" then
-        match argsList with
-        | [target] => return mkStmtExprMd (.Resume target none) src
-        | [target, value] => return mkStmtExprMd (.Resume target (some value)) src
-        | _ =>
-          TransM.error s!"resume expects 1 or 2 arguments, got {argsList.length}"
-      if calleeName.text == "old" then
-        match argsList with
-        | [value] => return mkStmtExprMd (.Old value) src
-        | _ =>
-          TransM.error s!"old expects 1 argument, got {argsList.length}"
-      return mkStmtExprMd (.StaticCall calleeName argsList) src
+      -- Three call shapes flow through the same `Laurel.call` production:
+      --   * `resume(target [, value])` and `old(e)` — special-cased by
+      --     callee text into dedicated AST nodes so the inverse (A→C)
+      --     can recognize and reprint them.
+      --   * `obj#method(args)` — parses as `call(fieldAccess(obj, method), args)`,
+      --     lowered to `InstanceCall`.
+      --   * everything else — `StaticCall`.
+      match callee.val with
+      | .Var (.Local name) =>
+        if name.text == "resume" then
+          match argsList with
+          | [target] => return mkStmtExprMd (.Resume target none) src
+          | [target, value] => return mkStmtExprMd (.Resume target (some value)) src
+          | _ => TransM.error s!"resume expects 1 or 2 arguments, got {argsList.length}"
+        if name.text == "old" then
+          match argsList with
+          | [value] => return mkStmtExprMd (.Old value) src
+          | _ => TransM.error s!"old expects 1 argument, got {argsList.length}"
+        return mkStmtExprMd (.StaticCall name argsList) src
+      | .Var (.Field target fieldName) =>
+        return mkStmtExprMd (.InstanceCall target fieldName argsList) src
+      | _ =>
+        return mkStmtExprMd (.StaticCall (mkId "") argsList) src
     | q`Laurel.return, #[arg0] =>
       let value ← translateStmtExpr arg0
       return mkStmtExprMd (.Return (some value)) src
