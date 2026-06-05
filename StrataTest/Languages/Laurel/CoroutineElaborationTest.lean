@@ -393,5 +393,66 @@ procedure pulse(flag: bool)
 #guard_msgs in
 #eval! do printProgram (← parseAndElaborate multiYieldBranch)
 
+/-! ## Caller-side rewrite: `co: c` → `co: cState`, `resume(co[, v])` →
+`co#resume([v])` (an `InstanceCall`). -/
+
+def printProcsNamed (p : Program) (name : String) : IO Unit := do
+  for proc in p.staticProcedures do
+    if proc.name.text == name then
+      IO.println (toString (Std.Format.pretty (Std.ToFormat.format proc)))
+
+/-! ### Spawn + statement-position `resume(co)`. -/
+
+def spawnAndResume := r"
+coroutine producer(seed: int) yields (x: int)
+{
+  x := seed; yield
+};
+
+procedure driver()
+  opaque
+{
+  var co: producer := producer(0);
+  resume(co)
+};
+"
+
+/--
+info: procedure driver()
+  opaque
+{ var co: producerState := producer(0); (co#resume)() };
+-/
+#guard_msgs in
+#eval! do printProcsNamed (← parseAndElaborate spawnAndResume) "driver"
+
+/-! ### Expression-position `z := resume(co)` and statement-position
+`resume(co, v)` with a send value. -/
+
+def resumeWithSendDriver := r"
+coroutine echo() yields (x: int) resumes (y: int)
+  requires y >= 0
+{
+  x := 0; yield
+};
+
+procedure driver(): int
+  opaque
+{
+  var co: echo := echo();
+  var z: int := 0;
+  z := resume(co);
+  resume(co, 42);
+  return z
+};
+"
+
+/--
+info: procedure driver(): int
+  opaque
+{ var co: echoState := echo(); var z: int := 0; z := (co#resume)(); (co#resume)(42); return z };
+-/
+#guard_msgs in
+#eval! do printProcsNamed (← parseAndElaborate resumeWithSendDriver) "driver"
+
 end Strata.Laurel
 end

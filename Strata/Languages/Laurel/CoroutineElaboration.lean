@@ -1,6 +1,7 @@
 module
 
 public import Strata.Languages.Laurel.Resolution
+public import Strata.Languages.Laurel.MapStmtExpr
 import Strata.Util.Tactics
 
 public section
@@ -870,36 +871,135 @@ private def coroutineConstructor (naming : FieldNaming) (proc : Procedure)
     invokeOn := none
     body := .Opaque (pcEnsures :: inputEnsures) (some ctorBody) [] }
 
-/-- Phase A entry point: replace every coroutine procedure with a state
-    composite carrying a `resume` instance procedure.
+/-! ## Caller-side rewrite
 
-    Per coroutine procedure:
-      * `fieldNaming` fixes collision-safe field names, shared by the
-        composite declaration and the promoted-local body rewrite;
-      * `coroutineToComposite` builds the `$pc` + inputs + locals +
-        channel-binding field layout;
-      * `populateCoroutineComposite` adds the `resume` instance
-        procedure (the linearized state machine over the promoted body).
-    The coroutine procedure is dropped from `staticProcedures` (it is now
-    a type, not a callable); the generated composite is appended to
-    `types`. The spawn constructor (a static procedure named after the
-    coroutine) replaces the dropped coroutine in `staticProcedures`, so a
-    `coro(args)` call still resolves to a callable. Regular procedures
-    pass through untouched.
+For each elaborated coroutine `c`, retarget every caller:
+  * type annotations `co: c` → `co: <c>State`
+  * `resume(co[, v])` → `InstanceCall co #"resume" [v?]`
+  (`co#resume([v])` in concrete syntax)
 
-    TODO — call-site rewrite (separate change): a spawn `var co: coro :=
-    coro(args)` resolves its *call* to the new constructor automatically
-    (same name), but the *type annotation* `co: coro` still names the
-    removed coroutine type — it must be rewritten to `co: <coro>State`.
-    Likewise `resume(co[, v])` must become an instance call `co.resume(v)`.
-    Until that lands, `rejectCoroutines` (earlier in the pipeline)
-    guarantees any program containing a coroutine halts with a diagnostic
-    before Core, so the dangling references are never re-resolved into
-    final output. -/
+The pipeline re-resolves after this pass, so generated identifiers
+have `uniqueId := none`. -/
+
+private abbrev CoroutineSet := Std.HashSet String
+
+private def stateTypeName (id : Identifier) : Identifier :=
+  { id with text := id.text ++ "State", uniqueId := none }
+
+/-- Rewrite a `HighTypeMd`: every `UserDefined ref` naming a coroutine
+    in `coros` becomes `<ref>State`. Recurses into structural type
+    formers. -/
+private def rewriteCallerType (coros : CoroutineSet) (ty : HighTypeMd) : HighTypeMd :=
+  let val' := match _h : ty.val with
+    | .UserDefined ref =>
+      if coros.contains ref.text then .UserDefined (stateTypeName ref) else ty.val
+    | .TTypedField vt => .TTypedField (rewriteCallerType coros vt)
+    | .TSet et => .TSet (rewriteCallerType coros et)
+    | .TMap kt vt => .TMap (rewriteCallerType coros kt) (rewriteCallerType coros vt)
+    | .Applied base args =>
+      .Applied (rewriteCallerType coros base) (args.attach.map fun ⟨a, _⟩ => rewriteCallerType coros a)
+    | .Pure base => .Pure (rewriteCallerType coros base)
+    | .Intersection tys =>
+      .Intersection (tys.attach.map fun ⟨t, _⟩ => rewriteCallerType coros t)
+    | .MultiValuedExpr tys =>
+      .MultiValuedExpr (tys.attach.map fun ⟨t, _⟩ => rewriteCallerType coros t)
+    | other => other
+  { ty with val := val' }
+termination_by sizeOf ty
+decreasing_by
+  all_goals simp_wf
+  all_goals (try have := AstNode.sizeOf_val_lt ty)
+  all_goals (try term_by_mem)
+  all_goals (cases ty; simp_all; omega)
+
+private def rewriteCallerParameter (coros : CoroutineSet) (p : Parameter) : Parameter :=
+  { p with type := rewriteCallerType coros p.type }
+
+/-- Rewrite a single node. Composes with `mapStmtExprM`'s bottom-up
+    traversal, so child `StmtExprMd` nodes are already rewritten when
+    this fires; the cases below patch only the *type* and `Resume`
+    positions that the generic traversal does not enter. -/
+private def rewriteCallerNode (coros : CoroutineSet) (e : StmtExprMd) : StmtExprMd :=
+  match e.val with
+  | .Resume target value =>
+    let resumeName : Identifier := { text := "resume", uniqueId := none, source := e.source }
+    { e with val := .InstanceCall target resumeName value.toList }
+  | .New ref =>
+    if coros.contains ref.text then { e with val := .New (stateTypeName ref) } else e
+  | .AsType target ty =>
+    { e with val := .AsType target (rewriteCallerType coros ty) }
+  | .IsType target ty =>
+    { e with val := .IsType target (rewriteCallerType coros ty) }
+  | .Var (.Declare param) =>
+    { e with val := .Var (.Declare (rewriteCallerParameter coros param)) }
+  | .Quantifier mode param trigger body =>
+    { e with val := .Quantifier mode (rewriteCallerParameter coros param) trigger body }
+  | .Assign targets value =>
+    let targets' := targets.map fun t => match t.val with
+      | .Declare param => { t with val := .Declare (rewriteCallerParameter coros param) }
+      | _ => t
+    { e with val := .Assign targets' value }
+  | .Hole det (some ty) =>
+    { e with val := .Hole det (some (rewriteCallerType coros ty)) }
+  | _ => e
+
+private def rewriteCallerProcedure (coros : CoroutineSet) (proc : Procedure) : Procedure :=
+  let f := mapStmtExpr (rewriteCallerNode coros)
+  let proc : Procedure := mapProcedureBodiesM (m := Id) f proc
+  { proc with
+    inputs := proc.inputs.map (rewriteCallerParameter coros)
+    outputs := proc.outputs.map (rewriteCallerParameter coros)
+    preconditions := proc.preconditions.map (·.mapCondition f)
+    relies := proc.relies.map (·.mapCondition f)
+    guarantees := proc.guarantees.map (·.mapCondition f)
+    decreases := proc.decreases.map f
+    invokeOn := proc.invokeOn.map f }
+
+private def rewriteCallerTypeDef (coros : CoroutineSet) (td : TypeDefinition) : TypeDefinition :=
+  let f := mapStmtExpr (rewriteCallerNode coros)
+  match td with
+  | .Composite ct =>
+    .Composite { ct with
+      fields := ct.fields.map fun fld => { fld with type := rewriteCallerType coros fld.type }
+      instanceProcedures := ct.instanceProcedures.map (rewriteCallerProcedure coros) }
+  | .Constrained ct =>
+    .Constrained { ct with
+      base := rewriteCallerType coros ct.base
+      constraint := f ct.constraint
+      witness := f ct.witness }
+  | .Datatype dt =>
+    .Datatype { dt with
+      constructors := dt.constructors.map fun ctor =>
+        { ctor with args := ctor.args.map (rewriteCallerParameter coros) } }
+  | .Alias ta =>
+    .Alias { ta with target := rewriteCallerType coros ta.target }
+
+private def rewriteCallerProgram (coros : CoroutineSet) (p : Program) : Program :=
+  if coros.isEmpty then p else
+  let f := mapStmtExpr (rewriteCallerNode coros)
+  { p with
+    staticProcedures := p.staticProcedures.map (rewriteCallerProcedure coros)
+    staticFields := p.staticFields.map fun fld =>
+      { fld with type := rewriteCallerType coros fld.type }
+    types := p.types.map (rewriteCallerTypeDef coros)
+    constants := p.constants.map fun c =>
+      { c with type := rewriteCallerType coros c.type, initializer := c.initializer.map f } }
+
+/-- Each coroutine `c` is replaced by:
+      * a state composite `<c>State` (built by `coroutineToComposite`)
+        carrying a `resume` instance procedure
+        (`populateCoroutineComposite`);
+      * a spawn constructor — a static procedure named `c` that
+        allocates the composite and initializes `$pc`
+        (`coroutineConstructor`).
+    The coroutine procedure is dropped; callers are retargeted by
+    `rewriteCallerProgram` (type annotations `co: c` → `co: <c>State`,
+    `resume(co[, v])` → `co#resume([v])`). Once `LiftInstanceProcedures`
+    runs, `co#resume(...)` folds into a static call to
+    `<c>State$resume`. Regular procedures pass through unchanged except
+    for the caller rewrite. -/
 def elaborateCoroutines (_ : SemanticModel) (p : Program) : Program :=
   let (coroutines, regulars) := p.staticProcedures.partition Procedure.is_coroutine
-  -- Each coroutine yields a state composite (with `resume`) and a spawn
-  -- constructor (a static procedure that allocates + initializes it).
   let generatedTypes : List TypeDefinition := coroutines.map fun proc =>
     let naming := fieldNaming proc
     let shell := coroutineToComposite naming proc
@@ -908,9 +1008,13 @@ def elaborateCoroutines (_ : SemanticModel) (p : Program) : Program :=
     let naming := fieldNaming proc
     let entry := coroutineEntryState naming proc
     coroutineConstructor naming proc (coroutineToComposite naming proc) entry
-  { p with
-    staticProcedures := regulars ++ generatedCtors,
-    types := p.types ++ generatedTypes }
+  let coros : CoroutineSet :=
+    coroutines.foldl (fun s c => s.insert c.name.text) ∅
+  let elaborated : Program :=
+    { p with
+      staticProcedures := regulars ++ generatedCtors,
+      types := p.types ++ generatedTypes }
+  rewriteCallerProgram coros elaborated
 
 
 end Strata.Laurel

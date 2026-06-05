@@ -6,13 +6,12 @@
 module
 
 /-
-Stage 1 tests for coroutine syntax: parse + resolution + the pipeline's
-"not yet verified" rejection.
+Stage 1/1.5 tests for coroutine syntax: parse + resolution.
 
 Coroutines, yield, resume, and rely/guarantee clauses parse and resolve
-cleanly. The pipeline's `rejectCoroutines` pass surfaces a single
-targeted diagnostic per coroutine declaration. Real verification (Phase A
-elaboration → Phase B Core lowering) is Stage 2/3 work.
+cleanly. Real verification (Phase A elaboration → Phase B Core lowering)
+runs further down the pipeline and is exercised by
+`CoroutineElaborationTest.lean`.
 
 The intended user-facing model:
   coroutine coro(x: int) { ... yield ... };
@@ -20,10 +19,11 @@ The intended user-facing model:
   var co := coro(1);
   // resume drives it forward:
   resume(co);
-At Stage 1 this all parses and resolves; semantics arrive in Stage 2 when
+
 Phase A elaboration replaces `coroutine coro` with a generated composite
-type plus a `Coro.resume` procedure, and rewrites `coro(1)` into
-`new Coro(1)` with an init block.
+`coroState` plus a `coro.resume` instance procedure, and rewrites the
+caller side: `co: coro` → `co: coroState`, `resume(co, v)` →
+`co#resume(v)`.
 -/
 
 meta import all StrataTest.Util.TestDiagnostics
@@ -447,22 +447,5 @@ procedure runLockServer(ps: ParticipantList)
 
 #guard_msgs (drop info, error) in
 #eval testInputWithOffset "LockServer" lockServerProgram 14 processResolution
-
-/-! ## Pipeline rejection: each coroutine triggers exactly one diagnostic.
-
-Runs the full Laurel pipeline. `rejectCoroutines` is the first stage; the
-program flows through unchanged after the diagnostic, so later passes
-don't add noise. The annotation matches a substring of the full message
-("coroutine 'empty' is parsed but not yet verified ..."). -/
-
-def coroutineRejected := r"
-coroutine empty()
-//        ^^^^^ error: parsed but not yet verified
-{
-};
-"
-
-#guard_msgs (drop info, error) in
-#eval testInputWithOffset "CoroutineRejected" coroutineRejected 14 processLaurelFile
 
 end Strata.Laurel

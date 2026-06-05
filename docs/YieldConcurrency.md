@@ -2,16 +2,17 @@
 
 ## Status
 
-**Stages 1, 1.5, and the core of Stage 2 are implemented.** Surface
-(parsing, AST, resolution, type-namespace registration, pretty-print
-round-trip) is in place, and Phase A elaboration now lowers each
-coroutine into a state composite + `resume` instance procedure + spawn
-constructor via a MoveNext-style state machine. What remains in Stage 2
-is the **caller-side rewrite** (spawn type-annotation and `resume(co,v)`
-call rewriting); until that lands, `rejectCoroutines` still guards the
-pipeline so no coroutine program reaches Core. Stage 3 (Core lowering of
-the rely/guarantee VCs and pairwise compatibility) is not yet started.
-See [Implementation status](#implementation-status) for details.
+**Stages 1, 1.5, and Stage 2 are implemented.** Surface (parsing, AST,
+resolution, type-namespace registration, pretty-print round-trip) is in
+place, and Phase A elaboration now lowers each coroutine into a state
+composite + `resume` instance procedure + spawn constructor via a
+MoveNext-style state machine, with the caller side rewritten in the
+same pass: type annotations `co: <c>` retarget to `co: <c>State`, and
+`resume(co[, v])` becomes the instance call `co#resume([v])`.
+`rejectCoroutines` is gone — coroutine programs flow through the
+pipeline like ordinary code. Stage 3 (Core lowering of the
+rely/guarantee VCs and pairwise compatibility) is not yet started. See
+[Implementation status](#implementation-status) for details.
 
 Strata models concurrency via coroutines with explicit `yield` and a
 per-yield rely/guarantee discipline (`relies` / `guarantees`)
@@ -463,20 +464,19 @@ replaces these nodes with composite-field reads. `Unknown` rather than
   [`FilterPrelude`](../Strata/Languages/Laurel/FilterPrelude.lean)
   recurse through the new constructors.
 - [`LaurelToCoreTranslator`](../Strata/Languages/Laurel/LaurelToCoreTranslator.lean)
-  raises *"Stage 2 not implemented"* on `Yield` and `Resume`. This is
-  unreachable in practice because `rejectCoroutines` short-circuits
-  earlier in the pipeline.
+  raises *"Stage 2 not implemented"* on `Yield` and `Resume`. After
+  Phase A elaboration runs, every `Yield` lives only inside the
+  generated dispatch loop (where it is replaced by `$pc := …; return`)
+  and every `Resume` is rewritten to an `InstanceCall co#resume(…)`,
+  so these arms are unreachable on a correctly-elaborated program —
+  they remain as a defensive diagnostic.
 
 #### Pipeline ([LaurelCompilationPipeline.lean](../Strata/Languages/Laurel/LaurelCompilationPipeline.lean))
 
-`rejectCoroutines` is the first pass: it emits one targeted diagnostic
-per coroutine and passes the program through unchanged. `CoroutineElaboration`
-runs later (before `HeapParameterization`) and *does* now rewrite
-coroutines into composites — but because a coroutine program already
-carries a blocking diagnostic from `rejectCoroutines`, the pipeline
-returns no Core program, so the elaborated output is never lowered. Once
-the caller-side rewrite lands, `rejectCoroutines` is deleted and
-elaboration becomes the live path.
+`CoroutineElaboration` runs before `HeapParameterization` and is the
+live path: it rewrites coroutines into composites *and* retargets every
+caller (type annotations and `resume(...)` calls). Coroutine programs
+flow through the pipeline like ordinary code.
 
 The `LaurelPass` structure gained two flags for this: `needsResolves`
 (re-resolve after the pass, so the model reflects newly-generated type
@@ -500,7 +500,6 @@ Twelve parse-and-resolve tests, plus an end-to-end lock-server example:
 | `ReturnWithValueInCoroutine` | negative test: `return e` rejected |
 | `BareReturnInCoroutine` | `return` from a nested loop/branch |
 | `LockServer` | end-to-end: `Message` datatype, two coroutines (`lockServer` + `participant`), `guarantees` rely/guarantee clauses, recursive `ParticipantList`, non-deterministic scheduler via `<??>` |
-| `CoroutineRejected` | full pipeline; pins the rejection diagnostic |
 
 ### Stage 2 — Phase A elaboration
 
@@ -558,32 +557,42 @@ elaborated safely).
   plain `requires` **verbatim** (its subjects are the inputs, which are
   the constructor's own parameters — no rewrite). `ensures $co#$pc == entry`
   and the input-copy equalities make the first resume's entry provable.
+- **Caller-side rewrite** (`rewriteCallerProgram`). Once each coroutine
+  `c` is replaced by `<c>State` + a spawn ctor named `c`, every caller
+  must be retargeted: type annotations `co: c` retarget to `co: <c>State`
+  (recursing into `Applied`/`TSet`/`TMap`/`Pure`/`Intersection` so a
+  coroutine inside `Set <c>` is rewritten too); every `resume(co[, v])`
+  AST node becomes `InstanceCall co (mkId "resume") [v?]`, the same
+  shape `LiftInstanceProcedures` (when present) folds into a top-level
+  `<c>State$resume` static call. The rewrite walks every static
+  procedure (inputs, outputs, contracts, body, decreases, invokeOn),
+  every type definition (composite fields + instance procs,
+  constrained-type base/constraint/witness, datatype constructor args,
+  alias targets), every static field, and every constant. Local var
+  declarations inside bodies, `AsType`/`IsType`/quantifier params, and
+  typed holes are all updated in the same pass. `rejectCoroutines` is
+  gone; coroutine programs flow through to Core.
 - **Tests**
   ([`CoroutineElaborationTest.lean`](../StrataTest/Languages/Laurel/CoroutineElaborationTest.lean)):
-  ten `#guard_msgs` golden cases. Core surface: empty, yield-in-while
+  twelve `#guard_msgs` golden cases. Core surface: empty, yield-in-while
   (`counter`), input + `requires` (`producer`), rely/guarantee channel
   (`echo`), bidirectional `x := yield` (`adder`), combined if-inside-while
   (`sieve`). Nested-structure stress cases: nested loops each with a yield
   (`grid`), nested conditionals with an asymmetric yield (`classify`), a
   yield-free inner loop that stays a single coalesced state (`summer`),
-  and sequential yields within one branch (`pulse`).
+  and sequential yields within one branch (`pulse`). Caller-side rewrite
+  cases: spawn + drop-style `resume(co)` (pins `co: producerState` and
+  `co#resume()`), and `z := resume(co)` / `resume(co, v)` (pins both
+  expression-position and statement-position rewrites).
 
 #### Remaining in Stage 2
 
-- **Caller-side rewrite.** A spawn `var co: coro := coro(args)` resolves
-  its *call* to the generated constructor automatically (same name), but
-  the *type annotation* `co: coro` still names the removed coroutine type
-  and must be rewritten to `co: <coro>State`. `resume(co)` /
-  `resume(co, v)` must become the instance call `co.resume()` /
-  `co.resume(v)`. This is the one piece keeping coroutine programs from
-  reaching Core.
 - **`exit <label>` safety check**: reject `exit` whose target labelled
   block contains a `yield`. Not yet implemented; same-segment exits are
   safe, cross-segment ones are not yet diagnosed.
 - **Expression-position yield in non-trivial positions** (e.g.
   `x := f(yield)`): currently kept as a single state rather than lowered;
   should be rejected at resolution.
-- **Delete `rejectCoroutines`** once the caller rewrite lands.
 
 ### Stage 3 plan — Core lowering and VCG
 
@@ -610,7 +619,7 @@ elaborated safely).
 
 ### Remaining TODOs
 
-Smaller items; none block the caller-side rewrite that completes Stage 2.
+Smaller items; none block Stage 2.
 
 - **Restrict bare `return` to coroutines.** Resolution permits
   `Return none` everywhere it parses; it should be rejected outside
@@ -623,14 +632,16 @@ Smaller items; none block the caller-side rewrite that completes Stage 2.
   `x ∈ guarantees only` / `y ∈ relies only`. Misuse
   currently surfaces as an unbound-name diagnostic.
 - **Argument and resume-target type checking.** Spawn calls
-  (`producer(args)`) and `resume(co, v)` are not arity- or type-checked
-  on the coroutine surface; the checks land naturally once the caller
-  rewrite turns them into ordinary constructor / instance-method calls
-  that the existing type checker covers.
-- **Plumb `T_resume` / `T_yield` into `LaurelTypes`.** After the caller
-  rewrite, `Yield` / `Resume` no longer survive to type inference (Phase
-  A replaces them with field reads / method calls), so this may dissolve
-  entirely — confirm once the rewrite lands.
+  (`producer(args)`) and the `co#resume(v)` instance call (post Phase A)
+  inherit arity and type checks from the existing constructor / instance
+  call paths. Worth a follow-up audit to confirm error messages localize
+  back to the original `resume(co, v)` source rather than the rewritten
+  form.
+- **Plumb `T_resume` / `T_yield` into `LaurelTypes`.** Phase A replaces
+  every `Resume` with `InstanceCall` and every `Yield` with dispatch-loop
+  surgery before type inference runs, so the `Unknown`-tagged arms in
+  [`LaurelTypes.lean`](../Strata/Languages/Laurel/LaurelTypes.lean) are
+  now defensive — confirm with a regression test and consider tightening.
 - **Asymmetric `Return none` round-trip.** Source `return` parses to
   `Return none`, but the A→C printer emits `return { }`; re-parsing
   yields `Return (some <empty block>)`. Fine for current usage; revisit
