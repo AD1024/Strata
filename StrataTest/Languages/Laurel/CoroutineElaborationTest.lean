@@ -58,10 +58,10 @@ coroutine empty()
 "
 
 /--
-info: composite emptyState { var $pc: intprocedure resume()
-  requires this#$pc != 0
+info: composite emptyState { var $pc: intprocedure resume(self: emptyState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 1 then { {  }; this#$pc := 0 } else return {  }; }
+while(true) if self#$pc == 1 then { {  }; self#$pc := 0 } else return {  }; }
 procedure empty()
   returns ($co: emptyState)
   opaque
@@ -90,10 +90,10 @@ coroutine counter() yields (x: int)
 "
 
 /--
-info: composite counterState { var $pc: int var i: int var x: intprocedure resume()
-  requires this#$pc != 0
+info: composite counterState { var $pc: int var i: int var x: intprocedure resume(self: counterState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 1 then { assert this#i >= 0; if this#i < 3 then this#$pc := 5 else this#$pc := 0 } else if this#$pc == 3 then { this#i := this#i + 1; assert this#i >= 0; this#$pc := 1 } else if this#$pc == 5 then { this#x := this#i; this#$pc := 3; return {  } } else if this#$pc == 6 then { this#i := 0; this#$pc := 1 } else return {  }; }
+while(true) if self#$pc == 1 then { assert self#i >= 0; if self#i < 3 then self#$pc := 5 else self#$pc := 0 } else if self#$pc == 3 then { self#i := self#i + 1; assert self#i >= 0; self#$pc := 1 } else if self#$pc == 5 then { self#x := self#i; self#$pc := 3; return {  } } else if self#$pc == 6 then { self#i := 0; self#$pc := 1 } else return {  }; }
 procedure counter()
   returns ($co: counterState)
   opaque
@@ -116,10 +116,10 @@ coroutine producer(seed: int) yields (x: int)
 "
 
 /--
-info: composite producerState { var $pc: int var seed: int var x: intprocedure resume()
-  requires this#$pc != 0
+info: composite producerState { var $pc: int var seed: int var x: intprocedure resume(self: producerState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 2 then { this#x := this#seed + 1; this#$pc := 0; return {  } } else if this#$pc == 4 then { this#x := this#seed; this#$pc := 2; return {  } } else return {  }; }
+while(true) if self#$pc == 2 then { self#x := self#seed + 1; self#$pc := 0; return {  } } else if self#$pc == 4 then { self#x := self#seed; self#$pc := 2; return {  } } else return {  }; }
 procedure producer(seed: int)
   returns ($co: producerState)
   requires seed >= 0
@@ -144,12 +144,12 @@ coroutine echo() yields (x: int) resumes (y: int)
 "
 
 /--
-info: composite echoState { var $pc: int var x: intprocedure resume(y: int)
-  requires this#$pc != 0
+info: composite echoState { var $pc: int var x: intprocedure resume(self: echoState, y: int)
+  requires self#$pc != 0
   requires y >= 0
   opaque
-  ensures this#x >= 0
-while(true) if this#$pc == 2 then { this#x := 0; this#$pc := 0; return {  } } else return {  }; }
+  ensures self#x >= 0
+while(true) if self#$pc == 2 then { self#x := 0; self#$pc := 0; return {  } } else return {  }; }
 procedure echo()
   returns ($co: echoState)
   opaque
@@ -170,7 +170,7 @@ both directions across a single suspension.
   * The incoming value is `resume`'s parameter `y` (from `resumes (y: int)`),
     read as a plain local — it is per-call data, not coroutine state.
   * `z` *is* promoted (it's a body local that lives across the yield), so
-    the rebind writes `this#z := y`. -/
+    the rebind writes `self#z := y`. -/
 
 def duplexCoroutine := r"
 coroutine adder() yields (out: int) resumes (inp: int)
@@ -185,10 +185,10 @@ coroutine adder() yields (out: int) resumes (inp: int)
 "
 
 /--
-info: composite adderState { var $pc: int var total: int var z: int var out: intprocedure resume(inp: int)
-  requires this#$pc != 0
+info: composite adderState { var $pc: int var total: int var z: int var out: intprocedure resume(self: adderState, inp: int)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 4 then { this#z := inp; this#total := this#total + this#z; this#out := this#total; this#$pc := 0; return {  } } else if this#$pc == 7 then { this#total := 0; this#out := this#total; this#$pc := 4; return {  } } else return {  }; }
+while(true) if self#$pc == 4 then { self#z := inp; self#total := self#total + self#z; self#out := self#total; self#$pc := 0; return {  } } else if self#$pc == 7 then { self#total := 0; self#out := self#total; self#$pc := 4; return {  } } else return {  }; }
 procedure adder()
   returns ($co: adderState)
   opaque
@@ -225,10 +225,10 @@ coroutine sieve(limit: int) yields (out: int)
 "
 
 /--
-info: composite sieveState { var $pc: int var limit: int var i: int var out: intprocedure resume()
-  requires this#$pc != 0
+info: composite sieveState { var $pc: int var limit: int var i: int var out: intprocedure resume(self: sieveState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 1 then { assert this#i >= 0; if this#i < this#limit then this#$pc := 8 else this#$pc := 0 } else if this#$pc == 3 then { this#i := this#i + 1; assert this#i >= 0; this#$pc := 1 } else if this#$pc == 5 then { this#out := this#i; this#$pc := 3; return {  } } else if this#$pc == 7 then { this#out := 0 - this#i; this#$pc := 3; return {  } } else if this#$pc == 8 then if this#i % 2 == 0 then this#$pc := 5 else this#$pc := 7 else if this#$pc == 9 then { this#i := 0; this#$pc := 1 } else return {  }; }
+while(true) if self#$pc == 1 then { assert self#i >= 0; if self#i < self#limit then self#$pc := 8 else self#$pc := 0 } else if self#$pc == 3 then { self#i := self#i + 1; assert self#i >= 0; self#$pc := 1 } else if self#$pc == 5 then { self#out := self#i; self#$pc := 3; return {  } } else if self#$pc == 7 then { self#out := 0 - self#i; self#$pc := 3; return {  } } else if self#$pc == 8 then if self#i % 2 == 0 then self#$pc := 5 else self#$pc := 7 else if self#$pc == 9 then { self#i := 0; self#$pc := 1 } else return {  }; }
 procedure sieve(limit: int)
   returns ($co: sieveState)
   opaque
@@ -264,10 +264,10 @@ coroutine grid(rows: int, cols: int) yields (cell: int)
 "
 
 /--
-info: composite gridState { var $pc: int var rows: int var cols: int var r: int var c: int var cell: intprocedure resume()
-  requires this#$pc != 0
+info: composite gridState { var $pc: int var rows: int var cols: int var r: int var c: int var cell: intprocedure resume(self: gridState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 1 then { assert this#r >= 0; if this#r < this#rows then this#$pc := 9 else this#$pc := 0 } else if this#$pc == 3 then { this#r := this#r + 1; assert this#r >= 0; this#$pc := 1 } else if this#$pc == 4 then { assert this#c >= 0; if this#c < this#cols then this#$pc := 8 else this#$pc := 3 } else if this#$pc == 6 then { this#c := this#c + 1; assert this#c >= 0; this#$pc := 4 } else if this#$pc == 8 then { this#cell := this#r * this#cols + this#c; this#$pc := 6; return {  } } else if this#$pc == 9 then { this#c := 0; this#$pc := 4 } else if this#$pc == 10 then { this#r := 0; this#$pc := 1 } else return {  }; }
+while(true) if self#$pc == 1 then { assert self#r >= 0; if self#r < self#rows then self#$pc := 9 else self#$pc := 0 } else if self#$pc == 3 then { self#r := self#r + 1; assert self#r >= 0; self#$pc := 1 } else if self#$pc == 4 then { assert self#c >= 0; if self#c < self#cols then self#$pc := 8 else self#$pc := 3 } else if self#$pc == 6 then { self#c := self#c + 1; assert self#c >= 0; self#$pc := 4 } else if self#$pc == 8 then { self#cell := self#r * self#cols + self#c; self#$pc := 6; return {  } } else if self#$pc == 9 then { self#c := 0; self#$pc := 4 } else if self#$pc == 10 then { self#r := 0; self#$pc := 1 } else return {  }; }
 procedure grid(rows: int, cols: int)
   returns ($co: gridState)
   opaque
@@ -302,10 +302,10 @@ coroutine classify(x: int) yields (tag: int)
 "
 
 /--
-info: composite classifyState { var $pc: int var x: int var tag: intprocedure resume()
-  requires this#$pc != 0
+info: composite classifyState { var $pc: int var x: int var tag: intprocedure resume(self: classifyState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 2 then { this#tag := 0 - 1; this#$pc := 0; return {  } } else if this#$pc == 4 then { this#tag := 2; this#$pc := 2; return {  } } else if this#$pc == 5 then { { this#tag := 1 }; this#$pc := 2 } else if this#$pc == 6 then if this#x > 10 then this#$pc := 4 else this#$pc := 5 else if this#$pc == 7 then { { this#tag := 0 }; this#$pc := 2 } else if this#$pc == 8 then if this#x > 0 then this#$pc := 6 else this#$pc := 7 else return {  }; }
+while(true) if self#$pc == 2 then { self#tag := 0 - 1; self#$pc := 0; return {  } } else if self#$pc == 4 then { self#tag := 2; self#$pc := 2; return {  } } else if self#$pc == 5 then { { self#tag := 1 }; self#$pc := 2 } else if self#$pc == 6 then if self#x > 10 then self#$pc := 4 else self#$pc := 5 else if self#$pc == 7 then { { self#tag := 0 }; self#$pc := 2 } else if self#$pc == 8 then if self#x > 0 then self#$pc := 6 else self#$pc := 7 else return {  }; }
 procedure classify(x: int)
   returns ($co: classifyState)
   opaque
@@ -343,11 +343,11 @@ coroutine summer(n: int) yields (running: int)
 "
 
 /--
-info: composite summerState { var $pc: int var n: int var total: int var i: int var j: int var running: intprocedure resume()
-  requires this#$pc != 0
+info: composite summerState { var $pc: int var n: int var total: int var i: int var j: int var running: intprocedure resume(self: summerState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 1 then { assert this#i >= 0; if this#i < this#n then this#$pc := 7 else this#$pc := 0 } else if this#$pc == 3 then { this#i := this#i + 1; assert this#i >= 0; this#$pc := 1 } else if this#$pc == 7 then { this#j := 0; while(this#j < this#i)
-  invariant this#j >= 0 { this#total := this#total + this#j; this#j := this#j + 1 }; this#running := this#total; this#$pc := 3; return {  } } else if this#$pc == 9 then { this#total := 0; this#i := 0; this#$pc := 1 } else return {  }; }
+while(true) if self#$pc == 1 then { assert self#i >= 0; if self#i < self#n then self#$pc := 7 else self#$pc := 0 } else if self#$pc == 3 then { self#i := self#i + 1; assert self#i >= 0; self#$pc := 1 } else if self#$pc == 7 then { self#j := 0; while(self#j < self#i)
+  invariant self#j >= 0 { self#total := self#total + self#j; self#j := self#j + 1 }; self#running := self#total; self#$pc := 3; return {  } } else if self#$pc == 9 then { self#total := 0; self#i := 0; self#$pc := 1 } else return {  }; }
 procedure summer(n: int)
   returns ($co: summerState)
   opaque
@@ -379,10 +379,10 @@ coroutine pulse(flag: bool) yields (beat: int)
 "
 
 /--
-info: composite pulseState { var $pc: int var flag: bool var beat: intprocedure resume()
-  requires this#$pc != 0
+info: composite pulseState { var $pc: int var flag: bool var beat: intprocedure resume(self: pulseState)
+  requires self#$pc != 0
   opaque
-while(true) if this#$pc == 2 then { this#beat := 9; this#$pc := 0; return {  } } else if this#$pc == 4 then { this#beat := 2; this#$pc := 2; return {  } } else if this#$pc == 6 then { this#beat := 1; this#$pc := 4; return {  } } else if this#$pc == 7 then { { this#beat := 0 }; this#$pc := 2 } else if this#$pc == 8 then if this#flag then this#$pc := 6 else this#$pc := 7 else return {  }; }
+while(true) if self#$pc == 2 then { self#beat := 9; self#$pc := 0; return {  } } else if self#$pc == 4 then { self#beat := 2; self#$pc := 2; return {  } } else if self#$pc == 6 then { self#beat := 1; self#$pc := 4; return {  } } else if self#$pc == 7 then { { self#beat := 0 }; self#$pc := 2 } else if self#$pc == 8 then if self#flag then self#$pc := 6 else self#$pc := 7 else return {  }; }
 procedure pulse(flag: bool)
   returns ($co: pulseState)
   opaque

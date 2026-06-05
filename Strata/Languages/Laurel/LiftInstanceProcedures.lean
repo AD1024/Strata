@@ -37,12 +37,17 @@ resolve pass. `defineNameCheckDup` reuses an existing uniqueId, which can
 collide across siblings (e.g. two lifted procs both with a `self` parameter
 sharing a uid from the original composite scope). We clear every uniqueId
 on the clone; the resolution pass that follows will re-assign them.
+
+Exposed so other AST-generating passes (e.g. `CoroutineElaboration`) can
+scrub their generated procedures before re-resolution.
 -/
 
-private def clearIdent (id : Identifier) : Identifier :=
+public section
+
+def clearIdent (id : Identifier) : Identifier :=
   { id with uniqueId := none }
 
-private def clearHighType (ty : HighTypeMd) : HighTypeMd :=
+def clearHighType (ty : HighTypeMd) : HighTypeMd :=
   match _h: ty.val with
   | .UserDefined name => { ty with val := .UserDefined (clearIdent name) }
   | .TTypedField vt => { ty with val := .TTypedField (clearHighType vt) }
@@ -61,12 +66,12 @@ private def clearHighType (ty : HighTypeMd) : HighTypeMd :=
     all_goals (have := AstNode.sizeOf_val_lt ty; simp_all; try omega)
     all_goals (have := List.sizeOf_lt_of_mem ‹_›; simp_all; omega)
 
-private def clearParameter (p : Parameter) : Parameter :=
+def clearParameter (p : Parameter) : Parameter :=
   { name := clearIdent p.name, type := clearHighType p.type }
 
 /-- Clear `uniqueId` on every Identifier reachable from a `StmtExprMd`.
     Uses `mapStmtExprM` for recursion. -/
-private def clearExprIds (expr : StmtExprMd) : StmtExprMd :=
+def clearExprIds (expr : StmtExprMd) : StmtExprMd :=
   let oneNode (e : StmtExprMd) : StmtExprMd :=
     match e.val with
     | .Var (.Local name) => { e with val := .Var (.Local (clearIdent name)) }
@@ -95,10 +100,10 @@ private def clearExprIds (expr : StmtExprMd) : StmtExprMd :=
     | _ => e
   mapStmtExpr oneNode expr
 
-private def clearCondition (c : Condition) : Condition :=
+def clearCondition (c : Condition) : Condition :=
   { c with condition := clearExprIds c.condition }
 
-private def clearBody (body : Body) : Body :=
+def clearBody (body : Body) : Body :=
   match body with
   | .Transparent b => .Transparent (clearExprIds b)
   | .Opaque ps impl modif =>
@@ -106,7 +111,7 @@ private def clearBody (body : Body) : Body :=
   | .Abstract ps => .Abstract (ps.map clearCondition)
   | .External => .External
 
-private def clearProcUniqueIds (proc : Procedure) : Procedure :=
+def clearProcUniqueIds (proc : Procedure) : Procedure :=
   { proc with
     name := clearIdent proc.name
     inputs := proc.inputs.map clearParameter
@@ -115,6 +120,8 @@ private def clearProcUniqueIds (proc : Procedure) : Procedure :=
     decreases := proc.decreases.map clearExprIds
     invokeOn := proc.invokeOn.map clearExprIds
     body := clearBody proc.body }
+
+end -- public section
 
 /-! ## Lifting + call-site rewriting -/
 

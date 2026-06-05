@@ -2,6 +2,7 @@ module
 
 public import Strata.Languages.Laurel.Resolution
 public import Strata.Languages.Laurel.MapStmtExpr
+public import Strata.Languages.Laurel.LiftInstanceProcedures
 import Strata.Util.Tactics
 
 public section
@@ -770,13 +771,28 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
     -- `resume` postconditions = per-yield guarantees (unguarded) ++
     -- END-guarded halt ensures.
     let resumePosts := guarantees' ++ haltEnsures
+    -- The body and contracts emit `.This`/`this#…`. After
+    -- `LiftInstanceProcedures` lifts this method to a static procedure,
+    -- `this` no longer resolves; declare an explicit `self : <c>State`
+    -- input (the convention `LiftInstanceProcedures` already supports
+    -- for hand-written instance methods) and rewrite every `.This` to
+    -- `.Var (.Local self)`.
+    let selfName : Identifier := { text := "self", uniqueId := none, source := none }
+    let selfType : HighTypeMd := { val := .UserDefined composite.name, source := none }
+    let selfParam : Parameter := { name := selfName, type := selfType }
+    let thisToSelf : StmtExprMd → StmtExprMd := mapStmtExpr fun e =>
+      match e.val with
+      | .This => { e with val := .Var (.Local selfName) }
+      | _ => e
+    let dispatchBody' := thisToSelf dispatchBody
+    let resumePosts' := resumePosts.map (·.mapCondition thisToSelf)
+    let preconds' := (notDone :: relies').map (·.mapCondition thisToSelf)
     let resumeProc : Procedure :=
       { kind := .Regular
         name := { proc.name with text := "resume" }
-        inputs := proc.resumes
+        inputs := selfParam :: proc.resumes
         outputs := []
-        -- `$pc != END` (not already done) plus the per-resume `relies`.
-        preconditions := notDone :: relies'
+        preconditions := preconds'
         relies := []
         guarantees := []
         yields := []
@@ -784,8 +800,7 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
         decreases := none
         isFunctional := false
         invokeOn := none
-        -- Postconditions on the Opaque body: guarantees + guarded halt.
-        body := .Opaque resumePosts (some dispatchBody) [] }
+        body := .Opaque resumePosts' (some dispatchBody') [] }
     { composite with instanceProcedures := resumeProc :: composite.instanceProcedures }
   | _ => composite
 
@@ -1000,14 +1015,24 @@ private def rewriteCallerProgram (coros : CoroutineSet) (p : Program) : Program 
     for the caller rewrite. -/
 def elaborateCoroutines (_ : SemanticModel) (p : Program) : Program :=
   let (coroutines, regulars) := p.staticProcedures.partition Procedure.is_coroutine
+  -- Generated AST inherits `uniqueId`s from the source coroutine, which
+  -- collide across the spawn ctor / `resume` / composite during the
+  -- post-pass `resolve`. Scrub every generated identifier so resolve
+  -- mints fresh ids cleanly.
+  let scrubComposite (ct : CompositeType) : CompositeType :=
+    { ct with
+      name := clearIdent ct.name
+      fields := ct.fields.map fun fld =>
+        { fld with name := clearIdent fld.name, type := clearHighType fld.type }
+      instanceProcedures := ct.instanceProcedures.map clearProcUniqueIds }
   let generatedTypes : List TypeDefinition := coroutines.map fun proc =>
     let naming := fieldNaming proc
     let shell := coroutineToComposite naming proc
-    .Composite (populateCoroutineComposite naming proc shell)
+    .Composite (scrubComposite (populateCoroutineComposite naming proc shell))
   let generatedCtors : List Procedure := coroutines.map fun proc =>
     let naming := fieldNaming proc
     let entry := coroutineEntryState naming proc
-    coroutineConstructor naming proc (coroutineToComposite naming proc) entry
+    clearProcUniqueIds (coroutineConstructor naming proc (coroutineToComposite naming proc) entry)
   let coros : CoroutineSet :=
     coroutines.foldl (fun s c => s.insert c.name.text) ∅
   let elaborated : Program :=
