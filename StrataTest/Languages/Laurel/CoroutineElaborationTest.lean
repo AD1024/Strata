@@ -420,7 +420,7 @@ procedure driver()
 /--
 info: procedure driver()
   opaque
-{ var co: producerState := producer(0); (co#resume)() };
+{ var co: producerState := producer(0); co#resume() };
 -/
 #guard_msgs in
 #eval! do printProcsNamed (← parseAndElaborate spawnAndResume) "driver"
@@ -449,7 +449,7 @@ procedure driver(): int
 /--
 info: procedure driver(): int
   opaque
-{ var co: echoState := echo(); var z: int := 0; z := (co#resume)(); (co#resume)(42); return z };
+{ var co: echoState := echo(); var z: int := 0; z := co#resume(); co#resume(42); return z };
 -/
 #guard_msgs in
 #eval! do printProcsNamed (← parseAndElaborate resumeWithSendDriver) "driver"
