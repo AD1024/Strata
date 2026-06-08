@@ -2,7 +2,6 @@ module
 
 public import Strata.Languages.Laurel.Resolution
 public import Strata.Languages.Laurel.MapStmtExpr
-public import Strata.Languages.Laurel.LiftInstanceProcedures
 import Strata.Util.Tactics
 
 public section
@@ -106,7 +105,7 @@ private def paramToField (naming : FieldNaming) (p : Parameter) : Field :=
     match p.name.uniqueId with
     | some uid => naming.getD uid p.name
     | none => p.name
-  { name := fieldName, isMutable := true, type := p.type }
+  { name := { fieldName with uniqueId := none }, isMutable := true, type := p.type }
 
 /-- Build the state-machine composite for a coroutine.
 
@@ -136,7 +135,7 @@ private def coroutineToComposite (naming : FieldNaming) (proc : Procedure) : Com
   let inputFields  := proc.inputs.map (paramToField naming)
   let localFields  := (collectVarDecl proc).map (paramToField naming)
   let yieldFields  := proc.yields.map  (paramToField naming)
-  { name := { proc.name with text := proc.name.text ++ "State" },
+  { name := { proc.name with text := proc.name.text ++ "State", uniqueId := none },
     extending := [],
     fields := pcField :: inputFields ++ localFields ++ yieldFields,
     instanceProcedures := [] }
@@ -789,7 +788,7 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
     let preconds' := (notDone :: relies').map (·.mapCondition thisToSelf)
     let resumeProc : Procedure :=
       { kind := .Regular
-        name := { proc.name with text := "resume" }
+        name := { proc.name with text := "resume", uniqueId := none }
         inputs := selfParam :: proc.resumes
         outputs := []
         preconditions := preconds'
@@ -871,7 +870,7 @@ private def coroutineConstructor (naming : FieldNaming) (proc : Procedure)
   let inputEnsures : List Condition := proc.inputs.map fun p =>
     { condition := eqInt (fieldRead (paramToField naming p).name) (paramRead p), summary := none }
   { kind := .Regular
-    name := proc.name
+    name := { proc.name with uniqueId := none }
     inputs := proc.inputs
     outputs := [{ name := coName, type := compositeTy }]
     -- Plain `requires` transfers verbatim — its subjects are the inputs,
@@ -1015,20 +1014,14 @@ private def rewriteCallerProgram (coros : CoroutineSet) (p : Program) : Program 
     for the caller rewrite. -/
 def elaborateCoroutines (_ : SemanticModel) (p : Program) : Program :=
   let (coroutines, regulars) := p.staticProcedures.partition Procedure.is_coroutine
-  let scrubComposite (ct : CompositeType) : CompositeType :=
-    { ct with
-      name := clearIdent ct.name
-      fields := ct.fields.map fun fld =>
-        { fld with name := clearIdent fld.name, type := clearHighType fld.type }
-      instanceProcedures := ct.instanceProcedures.map clearProcUniqueIds }
   let generatedTypes : List TypeDefinition := coroutines.map fun proc =>
     let naming := fieldNaming proc
     let shell := coroutineToComposite naming proc
-    .Composite (scrubComposite (populateCoroutineComposite naming proc shell))
+    .Composite (populateCoroutineComposite naming proc shell)
   let generatedCtors : List Procedure := coroutines.map fun proc =>
     let naming := fieldNaming proc
     let entry := coroutineEntryState naming proc
-    clearProcUniqueIds (coroutineConstructor naming proc (coroutineToComposite naming proc) entry)
+    coroutineConstructor naming proc (coroutineToComposite naming proc) entry
   let coros : CoroutineSet :=
     coroutines.foldl (fun s c => s.insert c.name.text) ∅
   let elaborated : Program :=
