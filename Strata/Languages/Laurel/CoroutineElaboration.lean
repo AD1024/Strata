@@ -1015,10 +1015,6 @@ private def rewriteCallerProgram (coros : CoroutineSet) (p : Program) : Program 
     for the caller rewrite. -/
 def elaborateCoroutines (_ : SemanticModel) (p : Program) : Program :=
   let (coroutines, regulars) := p.staticProcedures.partition Procedure.is_coroutine
-  -- Generated AST inherits `uniqueId`s from the source coroutine, which
-  -- collide across the spawn ctor / `resume` / composite during the
-  -- post-pass `resolve`. Scrub every generated identifier so resolve
-  -- mints fresh ids cleanly.
   let scrubComposite (ct : CompositeType) : CompositeType :=
     { ct with
       name := clearIdent ct.name
