@@ -447,6 +447,14 @@ private def emitState (id : Nat) (body : StmtExprMd) : LinM Unit :=
       coroutine state, so it is read as a plain local. -/
 private def linearize (naming : FieldNaming) (resumeParam : Option Identifier)
     (stmt : StmtExprMd) (next : Nat) : LinM Nat := do
+  -- Bare `return` inside a coroutine is the iterator-shutdown form:
+  -- transition to END (pc := 0) and exit the dispatch loop, not to
+  -- the loop-continue / fall-through `next`. Handle it before the
+  -- fast path so the `pcAssign next` trailer isn't emitted.
+  if let .Return none := stmt.val then
+    let id ← freshState
+    emitState id (block [pcAssign endState, bareReturn])
+    return id
   -- Fast path: a subtree with no yield is one atomic state.
   if !containsYield stmt then
     let id ← freshState

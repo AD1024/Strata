@@ -413,6 +413,36 @@ procedure pulse(flag: bool)
 #guard_msgs in
 #eval! do printProgram (← parseAndElaborate multiYieldBranch)
 
+/-! ## Bare `return` after `yield`: the post-yield state must shut the
+coroutine down (`$pc := 0`), not fall through to the loop-continue
+target. Regression test for a bug where the yield's emit code was
+duplicated into the post-yield state and the bare return was lost. -/
+
+def yieldThenReturn := r"
+coroutine done() yields (x: int)
+{
+  x := 42;
+  yield;
+  return
+};
+"
+
+/--
+info: composite doneState { var $pc: int var x: intprocedure resume(self: doneState)
+  returns (x: int)
+  requires self#$pc != 0
+  opaque
+while(true) if self#$pc == 1 then { self#$pc := 0; { x := self#x; return {  } } } else if self#$pc == 3 then { self#x := 42; self#$pc := 1; { x := self#x; return {  } } } else { x := self#x; return {  } };function has_next(self: doneState): bool
+self#$pc != 0; }
+procedure done()
+  returns ($co: doneState)
+  opaque
+  ensures $co#$pc == 3
+{ $co := new doneState; $co#$pc := 3 };
+-/
+#guard_msgs in
+#eval! do printProgram (← parseAndElaborate yieldThenReturn)
+
 /-! ## Caller-side rewrite: `co: c` → `co: cState`, `resume(co[, v])` →
 `co#resume([v])` (an `InstanceCall`). -/
 
