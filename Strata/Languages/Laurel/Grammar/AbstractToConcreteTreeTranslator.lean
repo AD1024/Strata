@@ -155,6 +155,8 @@ where
       laurelOp "call" #[laurelOp "identifier" #[ident "resume"], commaSep #[stmtExprToArg target]]
     | .Resume target (some value) =>
       laurelOp "call" #[laurelOp "identifier" #[ident "resume"], commaSep #[stmtExprToArg target, stmtExprToArg value]]
+    | .HasNext target =>
+      laurelOp "call" #[laurelOp "identifier" #[ident "has_next"], commaSep #[stmtExprToArg target]]
     | .Exit label => laurelOp "exit" #[ident label]
     | .Assert cond =>
       let errOpt := optionArg (cond.summary.map fun msg =>

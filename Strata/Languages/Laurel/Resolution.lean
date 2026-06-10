@@ -426,6 +426,9 @@ def resolveStmtExpr (exprMd : StmtExprMd) : ResolveM StmtExprMd := do
     let target' ← resolveStmtExpr target
     let val' ← val.attach.mapM (fun a => have := a.property; resolveStmtExpr a.val)
     pure (.Resume target' val')
+  | .HasNext target => do
+    let target' ← resolveStmtExpr target
+    pure (.HasNext target')
   | .LiteralInt v => pure (.LiteralInt v)
   | .LiteralBool v => pure (.LiteralBool v)
   | .LiteralString v => pure (.LiteralString v)
@@ -826,6 +829,7 @@ private def collectStmtExpr (map : Std.HashMap Nat ResolvedNode) (expr : StmtExp
   | .Resume target val =>
     let map := collectStmtExpr map target
     match val with | some v => collectStmtExpr map v | none => map
+  | .HasNext target => collectStmtExpr map target
   | .Var (.Local _) => map
   | .Var (.Declare param) =>
     let map := register map param.name (.var param.name param.type)

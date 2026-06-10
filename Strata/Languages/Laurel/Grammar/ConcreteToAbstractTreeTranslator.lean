@@ -305,6 +305,10 @@ partial def translateStmtExpr (arg : Arg) : TransM StmtExprMd := do
           | [target] => return mkStmtExprMd (.Resume target none) src
           | [target, value] => return mkStmtExprMd (.Resume target (some value)) src
           | _ => TransM.error s!"resume expects 1 or 2 arguments, got {argsList.length}"
+        if name.text == "has_next" then
+          match argsList with
+          | [target] => return mkStmtExprMd (.HasNext target) src
+          | _ => TransM.error s!"has_next expects 1 argument, got {argsList.length}"
         if name.text == "old" then
           match argsList with
           | [value] => return mkStmtExprMd (.Old value) src

@@ -80,14 +80,16 @@ def computeExprType (model : SemanticModel) (expr : StmtExprMd) : HighTypeMd :=
   | .While _ _ _ _ => ⟨ .TVoid, source ⟩
   | .Exit _ => ⟨ .TVoid, source ⟩
   | .Return _ => ⟨ .TVoid, source ⟩
-  -- Yield evaluates to the value sent by the next resume (T_resume of the
-  -- enclosing coroutine). Computing this requires enclosing-procedure
-  -- context that this pure walk does not have; left Unknown until Stage 2
-  -- elaboration carries it as a real composite-field read.
+  -- Yield evaluates to the value sent by the next resume (T_resume of
+  -- the enclosing coroutine). Computing this requires enclosing-procedure
+  -- context that this pure walk does not have; left Unknown until
+  -- coroutine elaboration replaces it with a composite-field read.
   | .Yield => ⟨ .Unknown, source ⟩
-  -- Resume evaluates to the value most recently yielded out by the target
-  -- coroutine (T_yield of target's type). Likewise deferred to Stage 2.
+  -- Resume evaluates to the value most recently yielded out by the
+  -- target coroutine (T_yield of target's type). Likewise deferred to
+  -- coroutine elaboration.
   | .Resume _ _ => ⟨ .Unknown, source ⟩
+  | .HasNext _ => ⟨ .TBool, source ⟩
   | .Assign _ value => computeExprType model value
   | .Assert _ => ⟨ .TVoid, source ⟩
   | .Assume _ => ⟨ .TVoid, source ⟩

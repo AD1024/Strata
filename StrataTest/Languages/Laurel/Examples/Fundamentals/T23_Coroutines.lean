@@ -6,12 +6,11 @@
 module
 
 /-
-Stage 1/1.5 tests for coroutine syntax: parse + resolution.
+Tests for coroutine surface syntax: parse + resolution.
 
 Coroutines, yield, resume, and rely/guarantee clauses parse and resolve
-cleanly. Real verification (Phase A elaboration → Phase B Core lowering)
-runs further down the pipeline and is exercised by
-`CoroutineElaborationTest.lean`.
+cleanly. Real verification runs further down the pipeline and is
+exercised by `CoroutineElaborationTest.lean`.
 
 The intended user-facing model:
   coroutine coro(x: int) { ... yield ... };
@@ -20,10 +19,10 @@ The intended user-facing model:
   // resume drives it forward:
   resume(co);
 
-Phase A elaboration replaces `coroutine coro` with a generated composite
-`coroState` plus a `coro.resume` instance procedure, and rewrites the
-caller side: `co: coro` → `co: coroState`, `resume(co, v)` →
-`co#resume(v)`.
+Coroutine elaboration replaces `coroutine coro` with a generated
+composite `coroState` plus a `coro.resume` instance procedure, and
+rewrites the caller side: `co: coro` → `co: coroState`,
+`resume(co, v)` → `co#resume(v)`.
 -/
 
 meta import all StrataTest.Util.TestDiagnostics
@@ -196,8 +195,8 @@ procedure driver(): int
 
 /-! ## `resume(co, v)` sends a value into the coroutine.
 
-Two-argument resume; the value `v` will, post-Stage-2, become the result
-of the coroutine's most recent `yield` (Python `gen.send(v)` semantics). -/
+Two-argument resume; the value `v` becomes the result of the
+coroutine's most recent `yield` (Python `gen.send(v)` semantics). -/
 
 def resumeWithSend := r"
 coroutine echo() yields (x: int) resumes (y: int)
@@ -216,6 +215,40 @@ procedure driver()
 
 #guard_msgs (drop info, error) in
 #eval testInputWithOffset "ResumeWithSend" resumeWithSend 14 processResolution
+
+/-! ## `has_next(co)` tests whether a coroutine has more to yield.
+
+Lowers to an instance call on the generated state composite; returns
+`true` iff `co`'s `$pc` is not the END (0) state. Useful as a loop
+guard around `resume(co)`. -/
+
+def hasNextTest := r"
+coroutine ticker() yields (x: int)
+{
+  var i: int := 0;
+  while (i < 3)
+    invariant i >= 0
+  {
+    x := i;
+    yield;
+    i := i + 1
+  }
+};
+
+procedure driver()
+  opaque
+{
+  var co: ticker := ticker();
+  while (has_next(co))
+    invariant true
+  {
+    resume(co)
+  }
+};
+"
+
+#guard_msgs (drop info, error) in
+#eval testInputWithOffset "HasNext" hasNextTest 14 processResolution
 
 /-! ## Coroutine consumes the value sent by `resume(co, v)`.
 

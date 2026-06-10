@@ -119,10 +119,6 @@ private def paramToField (naming : FieldNaming) (p : Parameter) : Field :=
     argument threaded as a parameter of the generated `resume` procedure,
     not coroutine state.
 
-    Heap-snapshot bookkeeping is *not* a field here either. The Stage-3
-    rely/guarantee VC introduces per-segment snapshots locally
-    against the heap value threaded by `HeapParameterization`.
-
     The composite is named `<proc>State` (e.g. `producer` ⇒
     `producerState`). Promoted-local field names come from `fieldNaming`,
     which mangles only on genuine `text` collision (Laurel allows
@@ -226,6 +222,8 @@ private def rewriteStmtExpr (naming : FieldNaming) (expr : StmtExprMd) : StmtExp
     { val := .Resume (rewriteStmtExpr naming target)
         (v.attach.map fun ⟨e, _⟩ => rewriteStmtExpr naming e),
       source := src }
+  | .HasNext target =>
+    { val := .HasNext (rewriteStmtExpr naming target), source := src }
   | .PureFieldUpdate target field newValue =>
     { val := .PureFieldUpdate (rewriteStmtExpr naming target) field
         (rewriteStmtExpr naming newValue), source := src }
@@ -365,6 +363,7 @@ private def containsYield (expr : StmtExprMd) : Bool :=
   | .Return v => match v with | some e => containsYield e | none => false
   | .Resume target v =>
     containsYield target || (match v with | some e => containsYield e | none => false)
+  | .HasNext target => containsYield target
   | .PureFieldUpdate target _ newValue => containsYield target || containsYield newValue
   | .StaticCall _ args => args.attach.any (fun ⟨a, _⟩ => containsYield a)
   | .PrimitiveOp _ args => args.attach.any (fun ⟨a, _⟩ => containsYield a)
@@ -530,8 +529,7 @@ private def linearize (naming : FieldNaming) (resumeParam : Option Identifier)
     -- Invariants are already local-promoted (rewriteStmtExpr recurses
     -- into `While` invariants before linearization), so they reference
     -- `self#…` fields. `decreases` is dropped — termination is a separate
-    -- Stage-3 obligation against `$pc`, not expressible as an inline
-    -- assert.
+    -- obligation against `$pc`, not expressible as an inline assert.
     let asserts : List StmtExprMd := invs.map fun i =>
       { val := .Assert { condition := i, summary := none }, source := i.source }
     let head ← freshState
@@ -556,8 +554,8 @@ private def linearize (naming : FieldNaming) (resumeParam : Option Identifier)
     -- promotion, or a yield nested in a call argument) is handled by
     -- the fast path's negation only if yield-free; reaching here means
     -- a yield in an unsupported position. Emit a straight-line state
-    -- that transitions to `next` so elaboration stays total; Stage-2
-    -- TODO: lower expression-position yields explicitly.
+    -- that transitions to `next` so elaboration stays total; lowering
+    -- expression-position yields explicitly is a TODO.
     let id ← freshState
     emitState id (block [stmt, pcAssign next])
     return id
@@ -746,8 +744,7 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
     let promoted := rewriteStmtExpr naming impl
     -- The resumed value is `resume`'s parameter. Laurel's surface allows
     -- a list, but the canonical `resumes (y: U)` has one binding; we read
-    -- the first as the `x := yield` target. (Multi-resume is a Stage-2
-    -- surface restriction.)
+    -- the first as the `x := yield` target.
     let resumeParam : Option Identifier := proc.resumes.head?.map (·.name)
     let (dispatchBody, _entry) := linearizeBody naming resumeParam promoted
     -- Rewrite every contract expression so it refers to the generated
@@ -786,11 +783,31 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
     let dispatchBody' := thisToSelf dispatchBody
     let resumePosts' := resumePosts.map (·.mapCondition thisToSelf)
     let preconds' := (notDone :: relies').map (·.mapCondition thisToSelf)
+    -- Copy each `yields (x: T)` binding from `self#<x>` into the output
+    -- parameter `x` immediately before every `return` in the dispatch
+    -- body, so callers receive the most-recently-yielded values.
+    let selfRead : StmtExprMd := { val := .Var (.Local selfName), source := none }
+    let yieldCopies : List StmtExprMd := proc.yields.map fun p =>
+      let fieldName := (paramToField naming p).name
+      let fieldRead : StmtExprMd :=
+        { val := .Var (.Field selfRead { fieldName with uniqueId := none }), source := none }
+      let outTarget : AstNode Variable :=
+        { val := .Local { p.name with uniqueId := none }, source := none }
+      { val := .Assign [outTarget] fieldRead, source := none }
+    let copyBeforeReturn (e : StmtExprMd) : StmtExprMd :=
+      match e.val with
+      | .Return none => block (yieldCopies ++ [e])
+      | _ => e
+    let dispatchBody'' :=
+      if proc.yields.isEmpty then dispatchBody'
+      else mapStmtExpr copyBeforeReturn dispatchBody'
+    let yieldOutputs : List Parameter := proc.yields.map fun p =>
+      { p with name := { p.name with uniqueId := none } }
     let resumeProc : Procedure :=
       { kind := .Regular
         name := { proc.name with text := "resume", uniqueId := none }
         inputs := selfParam :: proc.resumes
-        outputs := []
+        outputs := yieldOutputs
         preconditions := preconds'
         relies := []
         guarantees := []
@@ -799,8 +816,35 @@ private def populateCoroutineComposite (naming : FieldNaming) (proc : Procedure)
         decreases := none
         isFunctional := false
         invokeOn := none
-        body := .Opaque resumePosts' (some dispatchBody') [] }
-    { composite with instanceProcedures := resumeProc :: composite.instanceProcedures }
+        body := .Opaque resumePosts' (some dispatchBody'') [] }
+    -- `has_next(co)` returns true iff the coroutine has not yet run to
+    -- completion (its `$pc` field has not reached the END state). The
+    -- generated method is a pure observer; the user-side syntax
+    -- `has_next(co)` is rewritten to `co#has_next()` by the caller pass.
+    let hasNextOut : Identifier := { text := "result", uniqueId := none, source := none }
+    let hasNextOutParam : Parameter :=
+      { name := hasNextOut, type := { val := .TBool, source := none } }
+    let pcReadSelf : StmtExprMd :=
+      { val := .Var (.Field selfRead { text := "$pc", uniqueId := none, source := none }),
+        source := none }
+    let pcNeqEnd : StmtExprMd :=
+      { val := .PrimitiveOp .Neq [pcReadSelf, intLit (Int.ofNat endState)], source := none }
+    let hasNextProc : Procedure :=
+      { kind := .Regular
+        name := { proc.name with text := "has_next", uniqueId := none }
+        inputs := [selfParam]
+        outputs := [hasNextOutParam]
+        preconditions := []
+        relies := []
+        guarantees := []
+        yields := []
+        resumes := []
+        decreases := none
+        isFunctional := true
+        invokeOn := none
+        body := .Transparent pcNeqEnd }
+    { composite with
+      instanceProcedures := resumeProc :: hasNextProc :: composite.instanceProcedures }
   | _ => composite
 
 /-- The entry state id for a coroutine body — the `$pc` value the
@@ -938,6 +982,9 @@ private def rewriteCallerNode (coros : CoroutineSet) (e : StmtExprMd) : StmtExpr
   | .Resume target value =>
     let resumeName : Identifier := { text := "resume", uniqueId := none, source := e.source }
     { e with val := .InstanceCall target resumeName value.toList }
+  | .HasNext target =>
+    let methodName : Identifier := { text := "has_next", uniqueId := none, source := e.source }
+    { e with val := .InstanceCall target methodName [] }
   | .New ref =>
     if coros.contains ref.text then { e with val := .New (stateTypeName ref) } else e
   | .AsType target ty =>

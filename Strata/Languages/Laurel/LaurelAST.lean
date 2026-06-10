@@ -385,6 +385,10 @@ inductive StmtExpr : Type where
       As a statement, the resumed value (the next yield's payload) is dropped;
       in expression position (`x := resume(g, v)`) it is bound to `x`. -/
   | Resume (target : AstNode StmtExpr) (value : Option (AstNode StmtExpr))
+  /-- Has-next test on a coroutine instance: `has_next(co)` evaluates to
+      `true` iff `co` has not yet run to completion (its internal `$pc`
+      has not reached the END state). -/
+  | HasNext (target : AstNode StmtExpr)
 
 inductive ContractType where
   | Reads | Modifies | Precondition | PostCondition | Relies | Guarantees

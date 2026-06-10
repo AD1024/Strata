@@ -116,11 +116,6 @@ private def laurelPipeline : Array LaurelPass := #[
       let (p', diags) := eliminateValueReturnsTransform p
       (p', diags.toList, {}) },
   { name := "CoroutineElaboration"
-    -- Generates new state composites (with a `resume` instance procedure)
-    -- and drops the coroutine procedures. Must run before
-    -- `LiftInstanceProcedures` so the generated `resume` is folded into a
-    -- top-level static call. Re-resolve so the model reflects the new
-    -- type definitions before any downstream pass consumes it.
     needsResolves := true
     skipOnResolutionError := true
     run := fun p m => (elaborateCoroutines m p, [], {}) },
@@ -176,6 +171,7 @@ program state after each named Laurel pass is written to
 -/
 private def runLaurelPasses (options : LaurelTranslateOptions)
     (pctx : Strata.Pipeline.PipelineContext) (program : Program)
+    (skipPasses : Std.HashSet String := ∅)
     : PipelineM (Program × SemanticModel × List DiagnosticModel × Statistics) := do
   let program := { program with
     staticProcedures := coreDefinitionsForLaurel.staticProcedures ++ program.staticProcedures,
@@ -207,6 +203,9 @@ private def runLaurelPasses (options : LaurelTranslateOptions)
   let mut allStats : Statistics := {}
 
   for pass in laurelPipeline do
+    if skipPasses.contains pass.name then
+      emit pass.name "laurel.st" program
+      continue
     -- Skip resolution-dependent passes when the initial resolution
     -- failed: their inputs are malformed and a blocking diagnostic
     -- already guarantees no Core program is produced.
@@ -268,6 +267,32 @@ Translate Laurel Program to Core Program.
 def translate (options : LaurelTranslateOptions) (program : Program) : IO TranslateResult := do
   let (core, diags, _, _) ← translateWithLaurel options program
   return (core, diags)
+
+
+/--
+Run all Laurel-to-Laurel lowering passes on `program` and return the
+lowered Laurel program — i.e. the same pipeline `translateWithLaurel`
+runs *before* the final Laurel→Core translation. Useful when callers
+want to inspect, pretty-print, or further transform the elaborated
+Laurel without invoking Core.
+
+Returns `none` if any pass produced a blocking (non-warning)
+diagnostic. The diagnostics list is also returned so callers can
+explain the failure.
+-/
+def transformLaurel (options : LaurelTranslateOptions) (program : Program)
+    (pipelineCtx : Option Strata.Pipeline.PipelineContext := none)
+    : IO (Option Program × List DiagnosticModel × Statistics) := do
+  let pctx ← match pipelineCtx with
+    | some ctx => pure ctx
+    | none => Strata.Pipeline.PipelineContext.create (outputMode := .quiet)
+  let skip : Std.HashSet String :=
+    ((∅ : Std.HashSet String).insert "HeapParameterization").insert "TypeHierarchyTransform"
+  runPipelineM options.keepAllFilesPrefix do
+    let (program', _model, passDiags, stats) ← runLaurelPasses options pctx program skip
+    if passDiags.any (·.type != .Warning) then
+      return (none, passDiags, stats)
+    return (some program', passDiags, stats)
 
 /--
 Verify a Laurel program using an SMT solver.
