@@ -443,6 +443,44 @@ procedure done()
 #guard_msgs in
 #eval! do printProgram (← parseAndElaborate yieldThenReturn)
 
+/-! ## Bare `return` *nested* inside a yield-free conditional: the post-yield
+slice may end in `if c then { return }`, where the `return` is buried inside
+a yield-free subtree. Without the fix, the state's body kept the bare
+`return` verbatim — so the conditional taken-branch exited `resume` without
+ever resetting `$pc`, and on the next resume the same state re-fired
+forever (`has_next` stayed `true`). The fix rewrites every nested bare
+`return` to `{ $pc := 0; return }` before emitting a yield-free state. -/
+
+def yieldThenConditionalReturn := r"
+coroutine c() yields (x: int)
+{
+  var i: int := 0;
+  while (true)
+  {
+    x := i;
+    yield;
+    i := i + 1;
+    if i == 3 then { return }
+  }
+};
+"
+
+/--
+info: composite cState { var $pc: int var i: int var x: intprocedure resume(self: cState)
+  returns (x: int)
+  requires self#$pc != 0
+  opaque
+while(true) if self#$pc == 1 then { if true then self#$pc := 6 else self#$pc := 0 } else if self#$pc == 4 then { self#i := self#i + 1; if self#i == 3 then { { self#$pc := 0; { x := self#x; return {  } } } }; self#$pc := 1 } else if self#$pc == 6 then { self#x := self#i; self#$pc := 4; { x := self#x; return {  } } } else if self#$pc == 7 then { self#i := 0; self#$pc := 1 } else { x := self#x; return {  } };function has_next(self: cState): bool
+self#$pc != 0; }
+procedure c()
+  returns ($co: cState)
+  opaque
+  ensures $co#$pc == 7
+{ $co := new cState; $co#$pc := 7 };
+-/
+#guard_msgs in
+#eval! do printProgram (← parseAndElaborate yieldThenConditionalReturn)
+
 /-! ## Caller-side rewrite: `co: c` → `co: cState`, `resume(co[, v])` →
 `co#resume([v])` (an `InstanceCall`). -/
 

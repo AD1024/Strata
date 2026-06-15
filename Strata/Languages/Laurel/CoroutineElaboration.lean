@@ -336,6 +336,19 @@ private def pcAssign (k : Nat) : StmtExprMd :=
 /-- A bare `return` (no value) — the suspend half of a yield. -/
 private def bareReturn : StmtExprMd := { val := .Return none, source := none }
 
+/-- Rewrite every bare `return` inside `expr` to `{ $pc := 0; return }`,
+    so a yield-free subtree emitted as a single state always shuts the
+    coroutine. -/
+private def lowerBareReturns (expr : StmtExprMd) : StmtExprMd :=
+  mapStmtExpr (fun e =>
+    match e.val with
+    | .Return none =>
+      { val := .Block [{ val := .Assign [selfFieldTarget "$pc" e.source]
+                                        (intLit (Int.ofNat endState)),
+                         source := e.source }, e] none,
+        source := e.source }
+    | _ => e) expr
+
 /-- `lhs == rhs` over integers. -/
 private def eqInt (lhs rhs : StmtExprMd) : StmtExprMd :=
   { val := .PrimitiveOp .Eq [lhs, rhs], source := none }
@@ -447,18 +460,13 @@ private def emitState (id : Nat) (body : StmtExprMd) : LinM Unit :=
       coroutine state, so it is read as a plain local. -/
 private def linearize (naming : FieldNaming) (resumeParam : Option Identifier)
     (stmt : StmtExprMd) (next : Nat) : LinM Nat := do
-  -- Bare `return` inside a coroutine is the iterator-shutdown form:
-  -- transition to END (pc := 0) and exit the dispatch loop, not to
-  -- the loop-continue / fall-through `next`. Handle it before the
-  -- fast path so the `pcAssign next` trailer isn't emitted.
   if let .Return none := stmt.val then
     let id ← freshState
     emitState id (block [pcAssign endState, bareReturn])
     return id
-  -- Fast path: a subtree with no yield is one atomic state.
   if !containsYield stmt then
     let id ← freshState
-    emitState id (block [stmt, pcAssign next])
+    emitState id (block [lowerBareReturns stmt, pcAssign next])
     return id
   match _h: stmt.val with
   | .Block stmts _ =>
