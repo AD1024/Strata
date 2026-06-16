@@ -118,6 +118,11 @@ private partial def collectExprNames (expr : StmtExprMd) : CollectM Unit := do
   | .Assert cond => collectExprNames cond.condition
   | .Assume cond => collectExprNames cond
   | .Return val => val.forM collectExprNames
+  | .Yield => pure ()
+  | .Resume target val =>
+    collectExprNames target
+    val.forM collectExprNames
+  | .HasNext target => collectExprNames target
   | .Old val | .Fresh val | .Assigned val => collectExprNames val
   | .ProveBy val proof => collectExprNames val; collectExprNames proof
   | .ContractOf _ func => collectExprNames func

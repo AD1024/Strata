@@ -4,12 +4,13 @@
   SPDX-License-Identifier: Apache-2.0 OR MIT
 -/
 -- Grammar updated: renamed Optional* categories (op names updated)
+-- Grammar updated: `call` callee at prec 89 to accept fieldAccess (prec 90) chains
 module
 
 -- Laurel dialect definition, loaded from LaurelGrammar.st
 -- NOTE: Changes to LaurelGrammar.st are not automatically tracked by the build system.
 -- Update this file (e.g. this comment) to trigger a recompile after modifying LaurelGrammar.st.
--- Last grammar change: multiAssign supports field access targets, added opaque keyword.
+-- Last grammar change: renamed yield_requires / yield_ensures to relies / guarantees.
 public import StrataDDM.AST
 import StrataDDM.BuiltinDialects.Init
 import StrataDDM.Integration.Lean.HashCommands

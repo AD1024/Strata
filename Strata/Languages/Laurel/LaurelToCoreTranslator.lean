@@ -282,6 +282,9 @@ def translateExpr (expr : StmtExprMd)
   | .Block _ _ =>
       throwExprDiagnostic $ diagnosticFromSource expr.source "block expression should have been lowered in a separate pass" DiagnosticType.StrataBug
   | .Return _ => disallowed expr.source "return expression should be lowered in a separate pass"
+  | .Yield => throwExprDiagnostic $ diagnosticFromSource expr.source "coroutine yield should have been lowered by CoroutineElaboration" DiagnosticType.NotYetImplemented
+  | .Resume _ _ => throwExprDiagnostic $ diagnosticFromSource expr.source "coroutine resume should have been lowered by CoroutineElaboration" DiagnosticType.NotYetImplemented
+  | .HasNext _ => throwExprDiagnostic $ diagnosticFromSource expr.source "coroutine has_next should have been lowered by CoroutineElaboration" DiagnosticType.NotYetImplemented
 
   | .AsType target _ => throwExprDiagnostic $ diagnosticFromSource expr.source "AsType expression translation" DiagnosticType.NotYetImplemented
   | .Assigned _ => throwExprDiagnostic $ diagnosticFromSource expr.source "assigned expression translation" DiagnosticType.NotYetImplemented
@@ -484,6 +487,15 @@ def translateStmt (stmt : StmtExprMd)
           emitDiagnostic $ md.toDiagnostic "Return statement with value should have been eliminated by EliminateValueReturns pass" DiagnosticType.StrataBug
           modify fun s => { s with coreProgramHasSuperfluousErrors := true }
           return [.exit "$body" md]
+  | .Yield =>
+      emitDiagnostic $ md.toDiagnostic "coroutine yield should have been lowered by CoroutineElaboration" DiagnosticType.NotYetImplemented
+      return []
+  | .Resume _ _ =>
+      emitDiagnostic $ md.toDiagnostic "coroutine resume should have been lowered by CoroutineElaboration" DiagnosticType.NotYetImplemented
+      return []
+  | .HasNext _ =>
+      emitDiagnostic $ md.toDiagnostic "coroutine has_next should have been lowered by CoroutineElaboration" DiagnosticType.NotYetImplemented
+      return []
   | .While cond invariants decreasesExpr body =>
       let condExpr ← translateExpr cond
       let invExprs ← invariants.mapM (fun i => do return ("", ← translateExpr i))
@@ -700,7 +712,8 @@ abbrev TranslateResult := (Option Core.Program) × (List DiagnosticModel)
 
 /--
 Translate an `OrderedLaurel` program to a `Core.Program`.
-The `program` parameter is the lowered Laurel program, used for type definitions.
+The `program` parameter is the lowered Laurel program, used for the
+post-lifting sanity check on `CompositeType.instanceProcedures`.
 -/
 def translateLaurelToCore (options: LaurelTranslateOptions) (program : Program) (ordered : OrderedLaurel): TranslateM Core.Program := do
 
@@ -743,13 +756,15 @@ def translateLaurelToCore (options: LaurelTranslateOptions) (program : Program) 
       } mdWithUnknownLoc]
 
 
-  -- Emit diagnostics for composite types with instance procedures.
+  -- Instance procedures are lifted to top-level static procedures by the
+  -- `LiftInstanceProcedures` pass, so by the time we reach Core translation,
+  -- every composite's `instanceProcedures` list should be empty
   for td in program.types do
     if let .Composite ct := td then
       for proc in ct.instanceProcedures do
         emitDiagnostic $ diagnosticFromSource proc.name.source
-          s!"Instance procedure '{proc.name.text}' on composite type '{ct.name.text}' is not yet supported"
-          DiagnosticType.NotYetImplemented
+          s!"Instance procedure '{proc.name.text}' on composite type '{ct.name.text}' was not lifted before Core translation (pipeline-ordering bug)"
+          DiagnosticType.StrataBug
   pure { decls := coreDecls }
 
 end -- public section

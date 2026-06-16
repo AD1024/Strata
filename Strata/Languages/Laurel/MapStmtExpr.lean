@@ -45,6 +45,12 @@ def mapStmtExprM [Monad m] (f : StmtExprMd → m StmtExprMd) (expr : StmtExprMd)
       (← mapStmtExprM f body), source⟩
   | .Return v =>
     pure ⟨.Return (← v.attach.mapM fun ⟨e, _⟩ => mapStmtExprM f e), source⟩
+  | .Yield => pure ⟨.Yield, source⟩
+  | .Resume target v =>
+    pure ⟨.Resume (← mapStmtExprM f target)
+      (← v.attach.mapM fun ⟨e, _⟩ => mapStmtExprM f e), source⟩
+  | .HasNext target =>
+    pure ⟨.HasNext (← mapStmtExprM f target), source⟩
   | .Assign targets value =>
     let targets' ← targets.attach.mapM fun ⟨v, _⟩ => do
       let ⟨vv, vs⟩ := v
@@ -121,6 +127,8 @@ def mapProcedureM [Monad m] (f : StmtExprMd → m StmtExprMd) (proc : Procedure)
   let proc ← mapProcedureBodiesM f proc
   return { proc with
     preconditions := ← proc.preconditions.mapM (·.mapM f)
+    relies := ← proc.relies.mapM (·.mapM f)
+    guarantees := ← proc.guarantees.mapM (·.mapM f)
     decreases := ← proc.decreases.mapM f
     invokeOn := ← proc.invokeOn.mapM f }
 
