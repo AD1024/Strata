@@ -33,7 +33,8 @@ op initializer(value: StmtExpr): Initializer => " := " value:0;
 op varDecl (name: Ident, varType: Option TypeAnnotation, assignment: Option Initializer): StmtExpr
   => @[prec(0)] "var " name varType assignment;
 
-op call(callee: StmtExpr, args: CommaSepBy StmtExpr): StmtExpr => callee "(" args ")";
+op call(callee: StmtExpr, args: CommaSepBy StmtExpr): StmtExpr =>
+  @[prec(95)] callee:89 "(" args ")";
 
 // Instantiation
 op new(name: Ident): StmtExpr => "new " name;
@@ -106,6 +107,15 @@ op ifThenElse (cond: StmtExpr, thenBranch: StmtExpr, elseBranch: Option ElseBran
 op assert (cond : StmtExpr, errorMessage: Option ErrorSummary) : StmtExpr => @[prec(0)] "assert " cond:0 errorMessage:0;
 op assume (cond : StmtExpr) : StmtExpr => @[prec(0)] "assume " cond:0;
 op return (value : StmtExpr) : StmtExpr => @[prec(0)] "return " value:0;
+// Bare `return` (no value). Resolution restricts this to coroutine
+// bodies, where it is the iterator-termination form.
+op returnVoid : StmtExpr => @[prec(0)] "return";
+
+// Coroutine suspension. Always nullary; to yield a value, the user
+// assigns it to the coroutine's `yields` binding before suspending.
+// `yield` is dual-position: as a statement, drops the resumed value;
+// as an expression, evaluates to the value sent in by the next resume.
+op yield: StmtExpr => @[prec(0)] "yield";
 op block (stmts : SemicolonSepBy StmtExpr) : StmtExpr => @[prec(1000)] "{ " stmts " }";
 op labelledBlock (stmts : SemicolonSepBy StmtExpr, label : Ident) : StmtExpr => @[prec(1000)] "{ " stmts " }" label;
 op exit (label : Ident) : StmtExpr => @[prec(0)] "exit " label;
@@ -165,6 +175,18 @@ op requiresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): RequiresCl
 category EnsuresClause;
 op ensuresClause(cond: StmtExpr, errorMessage: Option ErrorSummary): EnsuresClause => "\n  ensures " cond:0 errorMessage;
 
+// Coroutine-only per-yield obligations. `relies` is the rely: a
+// property the caller restores between yields (so the coroutine can
+// assume it whenever it resumes). `guarantees` is the guarantee: a
+// property the coroutine establishes at every yield. Plain
+// `requires`/`ensures` on a coroutine remain the construction
+// precondition / halt postcondition respectively.
+category ReliesClause;
+op reliesClause(cond: StmtExpr, errorMessage: Option ErrorSummary): ReliesClause => "\n  relies " cond:0 errorMessage;
+
+category GuaranteesClause;
+op guaranteesClause(cond: StmtExpr, errorMessage: Option ErrorSummary): GuaranteesClause => "\n  guarantees " cond:0 errorMessage;
+
 category ModifiesClause;
 op modifiesClause(refs: CommaSepBy StmtExpr): ModifiesClause => "\n  modifies " refs;
 op modifiesWildcard: ModifiesClause => "\n  modifies *";
@@ -175,6 +197,23 @@ op returnParameters(parameters: CommaSepBy Parameter): ReturnParameters => "\n  
 category OpaqueSpec;
 op opaqueSpec(ensures: Seq EnsuresClause, modifies: Seq ModifiesClause): OpaqueSpec =>
   "\n  opaque" ensures modifies;
+
+// Coroutine spec block. Carries five sub-sequences:
+//   * `requires`    — construction precondition (checked at spawn).
+//   * `ensures`     — halt postcondition (checked when the
+//                     coroutine returns / falls off the end).
+//   * `relies`      — per-yield rely: assumed on entry to the body
+//                     and re-assumed after every `yield`. The caller
+//                     is obliged to re-establish it between yields.
+//   * `guarantees`  — per-yield guarantee: must hold at every
+//                     `yield` site.
+//   * `modifies`    — frame, as for procedures.
+category CoroutineSpec;
+op coroutineSpec(requires: Seq RequiresClause, ensures: Seq EnsuresClause,
+                 relies: Seq ReliesClause,
+                 guarantees: Seq GuaranteesClause,
+                 modifies: Seq ModifiesClause): CoroutineSpec
+  => requires ensures relies guarantees modifies;
 
 category Body;
 op body(body: StmtExpr): Body => "\n" body:0;
@@ -199,6 +238,27 @@ op function (name : Ident, parameters: CommaSepBy Parameter,
   body : Option Body) : Procedure =>
   "function " name "(" parameters ")" returnType returnParameters requires invokeOn opaqueSpec body ";";
 
+// `yields (x: T)` declares the outgoing-channel binding. `x` is in
+// scope inside the body and inside the `ensures` clauses (interpreted
+// per-yield in coroutine context). Mirrors `returns (r: T)` in shape.
+category YieldsClause;
+op yieldsClause(parameters: CommaSepBy Parameter): YieldsClause => "\n  yields " "(" parameters ")";
+
+// `resumes (y: U)` declares the incoming-channel binding. `y` is in
+// scope inside the `requires` clauses (interpreted per-resume in
+// coroutine context); the body retrieves the resumed value via the
+// expression form of `yield`.
+category ResumesClause;
+op resumesClause(parameters: CommaSepBy Parameter): ResumesClause => "\n  resumes " "(" parameters ")";
+
+category Coroutine;
+op coroutine (name: Ident, parameters: CommaSepBy Parameter,
+  yields: Option YieldsClause,
+  resumes: Option ResumesClause,
+  spec: Option CoroutineSpec,
+  body: Option Body) : Coroutine =>
+  "coroutine " name "(" parameters ")" yields resumes spec body ";";
+
 op composite (name: Ident, extending: Option Extends, fields: Seq Field, procedures: Seq Procedure): Composite => "composite " name extending " {" fields procedures " }";
 
 category ConstrainedType;
@@ -208,6 +268,7 @@ op constrainedType (name: Ident, valueName: Ident, base: LaurelType,
 
 op compositeCommand(composite: Composite): Command => composite;
 op procedureCommand(procedure: Procedure): Command => procedure;
+op coroutineCommand(coroutine: Coroutine): Command => coroutine;
 op datatypeCommand(datatype: Datatype): Command => datatype;
 op constrainedTypeCommand(ct: ConstrainedType): Command => ct;
 

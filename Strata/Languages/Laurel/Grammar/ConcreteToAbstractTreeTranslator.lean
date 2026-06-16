@@ -145,6 +145,7 @@ def translateParameters (arg : Arg) : TransM (List Parameter) := do
 
 instance : Inhabited Procedure where
   default := {
+    kind := .Regular
     name := ""
     inputs := []
     outputs := []
@@ -287,16 +288,41 @@ partial def translateStmtExpr (arg : Arg) : TransM StmtExprMd := do
       return mkStmtExprMd (.AsType target (mkHighTypeMd (.UserDefined typeName) src)) src
     | q`Laurel.call, #[arg0, argsSeq] =>
       let callee ← translateStmtExpr arg0
-      let calleeName := match callee.val with
-        | .Var (.Local name) => name
-        | _ => ""
       let argsList ← match argsSeq with
         | .seq _ .comma args => args.toList.mapM translateStmtExpr
         | _ => pure []
-      return mkStmtExprMd (.StaticCall calleeName argsList) src
+      -- Three call shapes flow through the same `Laurel.call` production:
+      --   * `resume(target [, value])` and `old(e)` — special-cased by
+      --     callee text into dedicated AST nodes so the inverse (A→C)
+      --     can recognize and reprint them.
+      --   * `obj#method(args)` — parses as `call(fieldAccess(obj, method), args)`,
+      --     lowered to `InstanceCall`.
+      --   * everything else — `StaticCall`.
+      match callee.val with
+      | .Var (.Local name) =>
+        if name.text == "resume" then
+          match argsList with
+          | [target] => return mkStmtExprMd (.Resume target none) src
+          | [target, value] => return mkStmtExprMd (.Resume target (some value)) src
+          | _ => TransM.error s!"resume expects 1 or 2 arguments, got {argsList.length}"
+        if name.text == "has_next" then
+          match argsList with
+          | [target] => return mkStmtExprMd (.HasNext target) src
+          | _ => TransM.error s!"has_next expects 1 argument, got {argsList.length}"
+        if name.text == "old" then
+          match argsList with
+          | [value] => return mkStmtExprMd (.Old value) src
+          | _ => TransM.error s!"old expects 1 argument, got {argsList.length}"
+        return mkStmtExprMd (.StaticCall name argsList) src
+      | .Var (.Field target fieldName) =>
+        return mkStmtExprMd (.InstanceCall target fieldName argsList) src
+      | _ =>
+        return mkStmtExprMd (.StaticCall (mkId "") argsList) src
     | q`Laurel.return, #[arg0] =>
       let value ← translateStmtExpr arg0
       return mkStmtExprMd (.Return (some value)) src
+    | q`Laurel.returnVoid, _ => return mkStmtExprMd (.Return none) src
+    | q`Laurel.yield, _ => return mkStmtExprMd .Yield src
     | q`Laurel.ifThenElse, #[arg0, arg1, elseArg] =>
       let cond ← translateStmtExpr arg0
       let thenBranch ← translateStmtExpr arg1
@@ -457,6 +483,57 @@ def translateEnsuresClauses (arg : Arg) : TransM (List Condition) := do
     pure allEnsures
   | _ => pure []
 
+/-- Translate a sequence of `reliesClause`/`guaranteesClause` ops.
+    The two share their grammar shape with `requiresClause`/`ensuresClause`
+    (a condition plus an optional error summary); only the wrapping op
+    name differs. -/
+private def translateRelyGuaranteeClauses (arg : Arg)
+    (opName : QualifiedIdent) : TransM (List Condition) := do
+  match arg with
+  | .seq _ _ args => do
+    let mut allClauses : List Condition := []
+    for clauseArg in args do
+      match clauseArg with
+      | .op clauseOp =>
+        if clauseOp.name == opName then
+          match clauseOp.args with
+          | #[exprArg, errMsgArg] =>
+            let expr ← translateStmtExpr exprArg
+            let summary ← match errMsgArg with
+              | .option _ (some (.op errOp)) => match errOp.name, errOp.args with
+                | q`Laurel.errorSummary, #[strArg] => do
+                  let msg ← translateString strArg
+                  pure (some msg)
+                | _, _ => pure none
+              | _ => pure none
+            allClauses := allClauses ++ [{ condition := expr, summary }]
+          | _ => TransM.error s!"Expected {repr opName} with 2 args"
+        else
+          TransM.error s!"Expected {repr opName}, got {repr clauseOp.name}"
+      | _ => TransM.error s!"Expected {repr opName} in clause sequence"
+    pure allClauses
+  | _ => pure []
+
+/-- Parse a `coroutineSpec` op into its five sub-sequences. The grammar
+    shape is `(requires, ensures, relies, guarantees, modifies)`:
+      * `requires`/`ensures` carry construction preconditions and halt
+        postconditions (whole-coroutine, like a regular procedure);
+      * `relies`/`guarantees` carry per-yield rely/guarantee
+        obligations (the rely-guarantee discipline). -/
+def translateCoroutineSpec (arg : Arg)
+    : TransM (List Condition × List Condition × List Condition × List Condition × List StmtExprMd) := do
+  match arg with
+  | .op op => match op.name, op.args with
+    | q`Laurel.coroutineSpec, #[reqArg, ensArg, relArg, guaArg, modArg] =>
+      let r ← translateRequiresClauses reqArg
+      let e ← translateEnsuresClauses ensArg
+      let rl ← translateRelyGuaranteeClauses relArg q`Laurel.reliesClause
+      let g ← translateRelyGuaranteeClauses guaArg q`Laurel.guaranteesClause
+      let m ← translateModifiesClauses modArg
+      pure (r, e, rl, g, m)
+    | _, _ => pure ([], [], [], [], [])
+  | _ => pure ([], [], [], [], [])
+
 def parseProcedure (arg : Arg) : TransM Procedure := do
   let .op op := arg
     | TransM.error s!"parseProcedure expects operation"
@@ -526,6 +603,7 @@ def parseProcedure (arg : Arg) : TransM Procedure := do
       | some b => Body.Transparent b
       | none => Body.Opaque [] none modifies
     return {
+      kind := .Regular
       name := name
       inputs := parameters
       outputs := returnParameters
@@ -540,6 +618,84 @@ def parseProcedure (arg : Arg) : TransM Procedure := do
     TransM.error s!"parseProcedure expects 8 arguments, got {args.size}"
   | _, _ =>
     TransM.error s!"parseProcedure expects procedure or function, got {repr op.name}"
+
+/-- Parse an optional `yieldsClause` or `resumesClause`. Both share the
+    `(parameters: CommaSepBy Parameter)` grammar shape with `returns (...)`.
+    Empty parens (`yields ()`) are rejected — the user should omit the
+    clause when there is no value to yield/resume. -/
+def parseChannelClause (arg : Arg) (opName : QualifiedIdent)
+    : TransM (List Parameter) := do
+  match arg with
+  | .option _ (some (.op clauseOp)) => match clauseOp.name, clauseOp.args with
+    | name, #[paramsArg] =>
+      if name == opName then
+        let params ← translateParameters paramsArg
+        if params.isEmpty then
+          TransM.error
+            s!"{repr opName} requires at least one parameter; \
+               omit the clause if there is no value"
+        else
+          pure params
+      else
+        TransM.error s!"Expected {repr opName}, got {repr name}"
+    | _, _ => TransM.error s!"Expected {repr opName}, got malformed op"
+  | .option _ none => pure []
+  | _ => pure []
+
+def parseCoroutine (arg : Arg) : TransM Procedure := do
+  let .op op := arg
+    | TransM.error s!"parseCoroutine expects operation"
+  match op.name, op.args with
+  | q`Laurel.coroutine, #[nameArg, paramArg, yieldsArg, resumesArg, specArg, bodyArg] =>
+    let name ← translateIdent nameArg
+    let parameters ← translateParameters paramArg
+    let yields ← parseChannelClause yieldsArg q`Laurel.yieldsClause
+    let resumes ← parseChannelClause resumesArg q`Laurel.resumesClause
+    -- The coroutine's spec carries five clause families: construction
+    -- `requires`, halt `ensures`, per-yield rely (`relies`), per-yield
+    -- guarantee (`guarantees`), and `modifies`.
+    let (preconditions, postconditions, relies, guarantees, modifies) ← match specArg with
+      | .option _ (some specOp) => translateCoroutineSpec specOp
+      | _ => pure ([], [], [], [], [])
+    -- Optional body. `externalBody` is bodyless; otherwise pull out the body
+    -- StmtExpr. A coroutine without a body is abstract (spec-only).
+    let isExternal ← match bodyArg with
+      | .option _ (some (.op bodyOp)) => match bodyOp.name, bodyOp.args with
+        | q`Laurel.externalBody, #[] => pure true
+        | _, _ => pure false
+      | _ => pure false
+    let bodyExpr ← match bodyArg with
+      | .option _ (some (.op bodyOp)) => match bodyOp.name, bodyOp.args with
+        | q`Laurel.body, #[exprArg] => translateCommand exprArg >>= (pure ∘ some)
+        | q`Laurel.externalBody, #[] => pure none
+        | _, _ => TransM.error s!"Expected body or externalBody operation, got {repr bodyOp.name}"
+      | .option _ none => pure none
+      | _ => TransM.error s!"Expected body, got {repr bodyArg}"
+    -- A coroutine's body is always Opaque: callers reason via the
+    -- per-yield postconditions and per-resume preconditions, not by
+    -- inlining. The `Opaque` body carries postconditions and modifies.
+    let procBody : Body :=
+      if isExternal then Body.External
+      else Body.Opaque postconditions bodyExpr modifies
+    return {
+      kind := .Coroutine
+      name := name
+      inputs := parameters
+      outputs := []   -- coroutines flow values via `yields`, not `outputs`
+      preconditions := preconditions
+      relies := relies
+      guarantees := guarantees
+      yields := yields
+      resumes := resumes
+      decreases := none
+      isFunctional := false
+      invokeOn := none
+      body := procBody
+    }
+  | q`Laurel.coroutine, args =>
+    TransM.error s!"parseCoroutine expects 6 arguments, got {args.size}"
+  | _, _ =>
+    TransM.error s!"parseCoroutine expects coroutine, got {repr op.name}"
 
 def parseField (arg : Arg) : TransM Field := do
   let .op op := arg
@@ -658,6 +814,9 @@ def parseTopLevel (arg : Arg) : TransM (Option Procedure × Option TypeDefinitio
   | q`Laurel.procedureCommand, #[procArg] =>
     let proc ← parseProcedure procArg
     return (some proc, none)
+  | q`Laurel.coroutineCommand, #[corArg] =>
+    let proc ← parseCoroutine corArg
+    return (some proc, none)
   | q`Laurel.compositeCommand, #[compositeArg] =>
     let typeDef ← parseComposite compositeArg
     return (none, some typeDef)
@@ -668,7 +827,7 @@ def parseTopLevel (arg : Arg) : TransM (Option Procedure × Option TypeDefinitio
     let ct ← parseConstrainedType ctArg
     return (none, some (.Constrained ct))
   | _, _ =>
-    TransM.error s!"parseTopLevel expects procedureCommand, compositeCommand, or datatypeCommand, got {repr op.name}"
+    TransM.error s!"parseTopLevel expects procedureCommand, coroutineCommand, compositeCommand, datatypeCommand, or constrainedTypeCommand, got {repr op.name}"
 
 /--
 Translate concrete Laurel syntax into abstract Laurel syntax

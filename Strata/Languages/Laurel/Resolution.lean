@@ -78,6 +78,7 @@ inductive ResolvedNodeKind where
   | typeAlias
   | constant
   | quantifierVar
+  | coroutineType
   | unresolved
   deriving Repr, BEq
 
@@ -95,6 +96,7 @@ def ResolvedNodeKind.name : ResolvedNodeKind → String
   | .typeAlias         => "type alias"
   | .constant          => "constant"
   | .quantifierVar     => "quantifier variable"
+  | .coroutineType     => "coroutine type"
   | .unresolved        => "unresolved"
 
 /-- A definition-site AST node that a reference can resolve to. -/
@@ -127,6 +129,11 @@ inductive ResolvedNode where
   | constant (c : Constant)
   /-- A quantifier-bound variable. -/
   | quantifierVar (name : Identifier) (type : HighTypeMd)
+  /-- A coroutine type definition. The coroutine name is purely structural:
+      it names a type whose values are coroutine instances, with a
+      constructor (the coroutine call form) and a `resume` operation.
+      Elaboration into a composite + procedures happens later. -/
+  | coroutineType (proc : Procedure)
   | unresolved (referenceSource: Option FileRange)
   deriving Repr
 
@@ -148,6 +155,7 @@ def ResolvedNode.kind : ResolvedNode → ResolvedNodeKind
   | .typeAlias ..         => .typeAlias
   | .constant ..          => .constant
   | .quantifierVar ..     => .quantifierVar
+  | .coroutineType ..     => .coroutineType
   | .unresolved _          => .unresolved
 
 def ResolvedNode.getType (node: ResolvedNode): HighTypeMd := match node with
@@ -160,7 +168,8 @@ def ResolvedNode.getType (node: ResolvedNode): HighTypeMd := match node with
  | .quantifierVar _ type => type
  | .unresolved source => ⟨ .Unknown, source ⟩
  | .staticProcedure _ | .instanceProcedure _ _ | .compositeType _
- | .constrainedType _ | .datatypeDefinition _ | .typeAlias _ => ⟨ .Unknown, none ⟩
+ | .constrainedType _ | .datatypeDefinition _ | .typeAlias _
+ | .coroutineType _ => ⟨ .Unknown, none ⟩
 
 /-! ## Resolution result -/
 
@@ -229,6 +238,11 @@ structure ResolveState where
       argument to another call or operator). Multi-output calls are only diagnosed
       in value context, not in statement position or direct assignment RHS. -/
   inValueContext : Bool := false
+  /-- The kind of the procedure currently being resolved. Used to reject
+      `return e` (with a value) inside coroutines, where the only legal forms
+      are bare `return` (terminator) and `x := e; yield` (value yield via
+      the `yields` binding). -/
+  currentProcKind : Option ProcedureKind := none
 
 @[expose] abbrev ResolveM := StateM ResolveState
 
@@ -341,7 +355,7 @@ def resolveHighType (ty : HighTypeMd) : ResolveM HighTypeMd := do
   let val' ← match val with
   | .UserDefined ref =>
     let ref' ← resolveRef ref ty.source
-      (expected := #[.compositeType, .constrainedType, .datatypeDefinition, .typeAlias])
+      (expected := #[.compositeType, .constrainedType, .datatypeDefinition, .typeAlias, .coroutineType])
     pure (.UserDefined ref')
   | .TTypedField vt =>
     let vt' ← resolveHighType vt
@@ -396,8 +410,25 @@ def resolveStmtExpr (exprMd : StmtExprMd) : ResolveM StmtExprMd := do
     pure (.While cond' invs' dec' body')
   | .Exit target => pure (.Exit target)
   | .Return val => do
+    -- `return e` is forbidden inside a coroutine: the only legal forms are
+    -- bare `return` (terminator) and `x := e; yield` (value yield via the
+    -- `yields` binding). This matches Python's distinction between
+    -- generator returns and yields.
+    if val.isSome ∧ (← get).currentProcKind == some .Coroutine then
+      let diag := diagnosticFromSource source
+        s!"return with a value is not allowed in a coroutine; \
+           use 'x := e; yield' to yield, or bare 'return' to terminate"
+      modify fun s => { s with errors := s.errors.push diag }
     let val' ← val.attach.mapM (fun a => have := a.property; resolveStmtExpr a.val)
     pure (.Return val')
+  | .Yield => pure .Yield
+  | .Resume target val => do
+    let target' ← resolveStmtExpr target
+    let val' ← val.attach.mapM (fun a => have := a.property; resolveStmtExpr a.val)
+    pure (.Resume target' val')
+  | .HasNext target => do
+    let target' ← resolveStmtExpr target
+    pure (.HasNext target')
   | .LiteralInt v => pure (.LiteralInt v)
   | .LiteralBool v => pure (.LiteralBool v)
   | .LiteralString v => pure (.LiteralString v)
@@ -458,7 +489,7 @@ def resolveStmtExpr (exprMd : StmtExprMd) : ResolveM StmtExprMd := do
     pure (.PureFieldUpdate target' fieldName' newVal')
   | .StaticCall callee args =>
     let callee' ← resolveRef callee source
-      (expected := #[.parameter, .staticProcedure, .datatypeConstructor, .datatypeDestructor, .constant])
+      (expected := #[.parameter, .staticProcedure, .datatypeConstructor, .datatypeDestructor, .constant, .coroutineType])
     -- Resolve arguments in value context (their results are used as values)
     let saved := (← get).inValueContext
     modify fun s => { s with inValueContext := true }
@@ -503,8 +534,18 @@ def resolveStmtExpr (exprMd : StmtExprMd) : ResolveM StmtExprMd := do
     pure (.IsType target' ty')
   | .InstanceCall target callee args =>
     let target' ← resolveStmtExpr target
-    let callee' ← resolveRef callee source
+    -- Look up the callee under the lifted key `<CompositeName>$<methodName>`,
+    -- matching how `preRegisterTopLevel` registers instance procedures. Fall
+    -- back to the bare name when the target's composite type is not yet
+    -- determinable (resolution still emits a diagnostic via `resolveRef`).
+    let lookupKey ← match (← targetTypeName target') with
+      | some tyName => pure (liftedProcName (mkId tyName) callee)
+      | none => pure callee
+    let resolved ← resolveRef lookupKey source
       (expected := #[.instanceProcedure, .staticProcedure])
+    -- Preserve the user-facing callee text (e.g. `tick`) for diagnostics;
+    -- only stamp the resolved `uniqueId` from the lifted lookup.
+    let callee' := { callee with uniqueId := resolved.uniqueId }
     let args' ← args.mapM resolveStmtExpr
     pure (.InstanceCall target' callee' args')
   | .Quantifier mode param trigger body =>
@@ -579,19 +620,46 @@ def resolveBody (body : Body) : ResolveM Body := do
 def resolveProcedure (proc : Procedure) : ResolveM Procedure := do
   let procName' ← resolveRef proc.name
   withScope do
+    let savedKind := (← get).currentProcKind
+    modify fun s => { s with currentProcKind := some proc.kind }
     let inputs' ← proc.inputs.mapM resolveParameter
     let outputs' ← proc.outputs.mapM resolveParameter
+    -- Coroutine channel bindings:
+    --   `yields (x: T)`  → `x` in scope inside body, `ensures` (halt
+    --                      postcondition), and `guarantees` (per-yield
+    --                      guarantee).
+    --   `resumes (y: U)` → `y` in scope inside `relies` (per-yield
+    --                      rely); the body retrieves resumed values
+    --                      via the expression form of `yield`.
+    let yields' ← proc.yields.mapM resolveParameter
+    let resumes' ← proc.resumes.mapM resolveParameter
+    -- `requires` is the construction precondition; resolved before any
+    -- channel bindings come into scope.
     let pres' ← proc.preconditions.mapM (·.mapM resolveStmtExpr)
+    -- Per-yield rely sees `resumes` bindings.
+    let relies' ← proc.relies.mapM (·.mapM resolveStmtExpr)
+    -- Per-yield guarantee sees `yields` bindings.
+    let guarantees' ← proc.guarantees.mapM (·.mapM resolveStmtExpr)
     let dec' ← proc.decreases.mapM resolveStmtExpr
     let body' ← resolveBody proc.body
     if !proc.isFunctional && body'.isTransparent then
       let diag := diagnosticFromSource proc.name.source
         s!"transparent procedures are not yet supported. Add 'opaque' to make the procedure opaque"
       modify fun s => { s with errors := s.errors.push diag }
+    -- `relies` / `guarantees` are coroutine-only.
+    if proc.kind == .Regular && (!proc.relies.isEmpty || !proc.guarantees.isEmpty) then
+      let diag := diagnosticFromSource proc.name.source
+        s!"`relies` / `guarantees` clauses are only allowed on coroutine declarations; \
+           use 'coroutine {proc.name.text}(...)' instead of 'procedure'"
+      modify fun s => { s with errors := s.errors.push diag }
     let invokeOn' ← proc.invokeOn.mapM resolveStmtExpr
-    return { name := procName', inputs := inputs', outputs := outputs',
+    modify fun s => { s with currentProcKind := savedKind }
+    return { kind := proc.kind, name := procName', inputs := inputs', outputs := outputs',
              isFunctional := proc.isFunctional,
-             preconditions := pres', decreases := dec',
+             preconditions := pres',
+             relies := relies', guarantees := guarantees',
+             yields := yields', resumes := resumes',
+             decreases := dec',
              invokeOn := invokeOn',
              body := body' }
 
@@ -608,24 +676,42 @@ def resolveField (ownerName : Identifier) (field : Field) : ResolveM Field := do
 
 /-- Resolve an instance procedure on a composite type. -/
 def resolveInstanceProcedure (typeName : Identifier) (proc : Procedure) : ResolveM Procedure := do
-  let procName' ← resolveRef proc.name
+  -- Look up by the lifted key `<CompositeName>$<methodName>`, matching how
+  -- `preRegisterTopLevel` registers instance procedures. Keep the original
+  -- (unqualified) procedure name in the AST; only adopt the resolved uniqueId.
+  let liftedKey := liftedProcName typeName proc.name
+  let resolved ← resolveRef liftedKey
+  let procName' := { proc.name with uniqueId := resolved.uniqueId }
   withScope do
     let savedInstType := (← get).instanceTypeName
-    modify fun s => { s with instanceTypeName := some typeName.text }
+    let savedKind := (← get).currentProcKind
+    modify fun s => { s with instanceTypeName := some typeName.text, currentProcKind := some proc.kind }
     let inputs' ← proc.inputs.mapM resolveParameter
     let outputs' ← proc.outputs.mapM resolveParameter
+    let yields' ← proc.yields.mapM resolveParameter
+    let resumes' ← proc.resumes.mapM resolveParameter
     let pres' ← proc.preconditions.mapM (·.mapM resolveStmtExpr)
+    let relies' ← proc.relies.mapM (·.mapM resolveStmtExpr)
+    let guarantees' ← proc.guarantees.mapM (·.mapM resolveStmtExpr)
     let dec' ← proc.decreases.mapM resolveStmtExpr
     let body' ← resolveBody proc.body
     if !proc.isFunctional && body'.isTransparent then
       let diag := diagnosticFromSource proc.name.source
         s!"transparent procedures are not yet supported. Add 'opaque' to make the procedure opaque"
       modify fun s => { s with errors := s.errors.push diag }
+    if proc.kind == .Regular && (!proc.relies.isEmpty || !proc.guarantees.isEmpty) then
+      let diag := diagnosticFromSource proc.name.source
+        s!"`relies` / `guarantees` clauses are only allowed on coroutine declarations; \
+           use 'coroutine {proc.name.text}(...)' instead of 'procedure'"
+      modify fun s => { s with errors := s.errors.push diag }
     let invokeOn' ← proc.invokeOn.mapM resolveStmtExpr
-    modify fun s => { s with instanceTypeName := savedInstType }
-    return { name := procName', inputs := inputs', outputs := outputs',
+    modify fun s => { s with instanceTypeName := savedInstType, currentProcKind := savedKind }
+    return { kind := proc.kind, name := procName', inputs := inputs', outputs := outputs',
              isFunctional := proc.isFunctional,
-             preconditions := pres', decreases := dec',
+             preconditions := pres',
+             relies := relies', guarantees := guarantees',
+             yields := yields', resumes := resumes',
+             decreases := dec',
              invokeOn := invokeOn',
              body := body' }
 
@@ -739,6 +825,11 @@ private def collectStmtExpr (map : Std.HashMap Nat ResolvedNode) (expr : StmtExp
     let map := match dec with | some d => collectStmtExpr map d | none => map
     collectStmtExpr map body
   | .Return val => match val with | some v => collectStmtExpr map v | none => map
+  | .Yield => map
+  | .Resume target val =>
+    let map := collectStmtExpr map target
+    match val with | some v => collectStmtExpr map v | none => map
+  | .HasNext target => collectStmtExpr map target
   | .Var (.Local _) => map
   | .Var (.Declare param) =>
     let map := register map param.name (.var param.name param.type)
@@ -808,6 +899,8 @@ private def collectProcedure (map : Std.HashMap Nat ResolvedNode) (proc : Proced
   let map := proc.inputs.foldl collectParameter map
   let map := proc.outputs.foldl collectParameter map
   let map := proc.preconditions.foldl (fun map c => collectStmtExpr map c.condition) map
+  let map := proc.relies.foldl (fun map c => collectStmtExpr map c.condition) map
+  let map := proc.guarantees.foldl (fun map c => collectStmtExpr map c.condition) map
   let map := match proc.decreases with | some d => collectStmtExpr map d | none => map
   collectBody map proc.body
 
@@ -859,7 +952,12 @@ def buildRefToDef (program : Program) : Std.HashMap Nat ResolvedNode :=
   let map := program.types.foldl collectTypeDefinition map
   let map := program.constants.foldl collectConstant map
   let map := program.staticFields.foldl (collectField · "$static" ·) map
-  program.staticProcedures.foldl (collectProcedure · · .staticProcedure) map
+  program.staticProcedures.foldl
+    (fun m p =>
+      match p.kind with
+      | .Coroutine => collectProcedure m p .coroutineType
+      | .Regular   => collectProcedure m p .staticProcedure)
+    map
 
 /-! ## Pre-registration: populate scope with all top-level names before resolving bodies -/
 
@@ -883,7 +981,13 @@ private def preRegisterTopLevel (program : Program) : ResolveM Unit := do
         let qualifiedName := ct.name.text ++ "." ++ field.name.text
         let _ ← defineNameCheckDup field.name (.field ct.name field) (some qualifiedName)
       for proc in ct.instanceProcedures do
+        -- Register the instance procedure under its lifted name
+        -- (`<CompositeName>$<methodName>`) so two composites can share a method
+        -- name without colliding in the global scope. `obj#method(args)` call
+        -- sites are resolved by `resolveStmtExpr` looking up this lifted key.
+        let liftedKey := (liftedProcName ct.name proc.name).text
         let _ ← defineNameCheckDup proc.name (.instanceProcedure ct.name proc)
+                                   (some liftedKey)
     | .Constrained ct =>
       let _ ← defineNameCheckDup ct.name (.constrainedType ct)
     | .Datatype dt =>
@@ -907,9 +1011,16 @@ private def preRegisterTopLevel (program : Program) : ResolveM Unit := do
   -- Pre-register constants
   for c in program.constants do
     let _ ← defineNameCheckDup c.name (.constant c)
-  -- Pre-register static procedures
+  -- Pre-register static procedures and coroutines.
+  -- Coroutines are not procedures: a coroutine name denotes a *type* whose
+  -- values are coroutine instances, with the call form acting as a
+  -- constructor and `resume` as a method. Registering as a single
+  -- `.coroutineType` entry — rather than dual-registering as both type
+  -- and procedure — keeps the namespace clean.
   for proc in program.staticProcedures do
-    let _ ← defineNameCheckDup proc.name (.staticProcedure proc)
+    match proc.kind with
+    | .Coroutine => let _ ← defineNameCheckDup proc.name (.coroutineType proc)
+    | .Regular   => let _ ← defineNameCheckDup proc.name (.staticProcedure proc)
 
 /-! ## Entry point -/
 
